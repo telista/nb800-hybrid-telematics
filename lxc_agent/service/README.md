@@ -10,9 +10,9 @@ Bu dizin, Alpine Linux LXC konteyneri içinde çalışan **`lxc_agent`** Python 
 `lxc_agent` servisinin varsayılan yapılandırma şablonudur. Konteyner ilk kez kurulduğunda `/etc/lxc_agent/config.json` konumuna kopyalanır.
 
 * **Değiştirilmesi Gereken Temel Parametreler:**
-  * `web.password`: Yerel web teşhis paneline (`:8080`) erişim için güçlü bir parola belirleyin.
+  * `device.imei`: Cihazınızın modem IMEI numarası. **Önemli:** Eğer bu alan doluysa (`web_server.py` gereği), `:8080` yerel web teşhis paneline HTTP Basic Auth ile girişte kullanıcı adı `admin`, **parola ise buraya girdiğiniz IMEI numarasıdır!**
+  * `web.password`: Eğer `device.imei` boş bırakılırsa web arayüzünde geçerli olacak yedek yönetici parolası.
   * `device.fleet_id` & `device.vehicle_id`: Kendi filo veya araç tanımlayıcınızı girin.
-  * `device.imei`: Cihazınızın gerçek modem IMEI numarasını tanımlayabilirsiniz.
   * `remote_mqtt.enabled`: Uzak merkezi broker bağlantısını aktif etmek için `true` yapın.
   * `remote_mqtt.host`: Kendi merkezi MQTT brokerınızın (veya VPN tünel uç noktanızın) IP/Domain adresini girin.
 

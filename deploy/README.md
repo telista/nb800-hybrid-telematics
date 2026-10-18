@@ -73,5 +73,6 @@ Konteyner ve router arasındaki IP haritası şu şekildedir:
    * **URL:** `pack_and_serve.sh` betiğinin ekrana bastığı URL (Örn: `http://192.168.10.50:8080/rootfs_alpine_armhf.tar.xz`)
    * **Storage:** Flash veya USB disk seçin.
 4. **Install** butonuna basarak imajın router'a indirilip açılmasını sağlayın.
-5. Konteyneri başlatın (**Start**).
-6. Tarayıcınızdan **`http://192.168.10.10:8080`** adresine giderek yerel Web Teşhis Paneline bağlanabilirsiniz (Varsayılan: `admin` / `CHANGE_ME_PASSWORD`).
+6. Tarayıcınızdan **`http://192.168.10.10:8080`** adresine giderek yerel Web Teşhis Paneline bağlanabilirsiniz:
+   * **Kullanıcı Adı:** `admin`
+   * **Şifre:** Sistemin güvenlik mantığı gereği web arayüzü şifresi `config.json` içinde tanımlı olan **`device.imei` (Modem IMEI)** numarasıdır (Varsayılan şablonda: `352255000000000`). Yalnızca IMEI alanı boş tanımlanmışsa `web.password` alanındaki şifre kullanılır.
