@@ -1,0 +1,452 @@
+================================================================================
+NB800 ARAÇ TELEMETRİ VE HABERLEŞME SİSTEMİ MİMARİSİ
+(NRSW Host + Built-in MQTT Broker + Alpine LXC Hibrit Modeli)
+================================================================================
+
+1. GENEL MİMARİ VE ÇALIŞMA PRENSİBİ
+--------------------------------------------------------------------------------
+Bu sistem, NetModule NB800 donanımının yerleşik yeteneklerini (NRSW işletim
+sistemi, dahili Mosquitto MQTT broker, SDK Arena motoru ve LXC konteyner ortamı)
+kullanarak güvenli, hata toleranslı ve çevrimdışı çalışabilen bir araç telemetri
+çözümü sunar.
+
+Sistemde iki ana ajan (daemon) ve bir yerel mesaj dağıtıcı (broker) bulunur:
+1. arena_agent (Host / NRSW Katmanı - Arena Dili):
+   - Donanım ve işletim sistemi seviyesindeki özel NetModule SDK (nb_*)
+     fonksiyonlarına doğrudan erişir.
+   - Dahili MQTT broker'ın bir istemcisidir (nb_mqttlib kütüphanesini kullanır).
+   - Donanım sensörleri (GNSS/GPS), sistem sağlığı (CPU sıcaklığı, bellek, vb.)
+     ve sistem yapılandırmasını (nb_config_*) yönetir.
+
+2. Dahili (Built-in) MQTT Broker (NRSW Servisi):
+   - Cihaz üzerinde çalışan yerel Mosquitto servisidir (Port: 1883).
+   - arena_agent ile lxc_agent arasında izolasyonu aşan hafif, yüksek hızlı ve
+     gevşek bağlı (loosely coupled) yerel bir IPC (Inter-Process Communication)
+     veri yolu görevi görür.
+   - Yalnızca dahili yerel arayüze (localhost ve LXC sanal ağına) açıktır.
+
+3. lxc_agent (Alpine Linux LXC Konteyner Katmanı - Python / Go / C):
+   - Konteyner içinde çalışarak NRSW kısıtlamalarından bağımsız, modern yazılım
+     kütüphanelerinin gücünden faydalanır.
+   - Dahili broker'a abone olup telemetriyi toplar, zenginleştirilmiş JSON
+     paketlerine dönüştürür.
+   - Dış dünyadaki Uzak Merkez Broker ile güvenli MQTTS (TLS 1.2/1.3) üzerinden
+     haberleşir.
+   - İnternet erişimi olmadığında veriyi yerel depolamada (SQLite / JSONL)
+     limitli bir dosyada saklar (Store-and-Forward / FIFO tamponu).
+
+
+================================================================================
+2. AĞ TOPOLOJİSİ VE İZOLASYON
+================================================================================
+- Konteyner Ağı Modu: NRSW Virtualization -> Routed Mod
+  * Host IP (NRSW Gateway) : 192.168.100.1
+  * Konteyner IP (Alpine)   : 192.168.100.2
+  * Alt Ağ Maskesi          : 255.255.255.0
+
+- Güvenlik ve Port Yapılandırması:
+  * Dahili Broker Portu: 1883 (Şifresiz, çünkü tamamen RAM/kernel içi ağda döner).
+  * Güvenlik Kuralı: NB800 Güvenlik Duvarı (Firewall) üzerinden hücresel (WWAN)
+    ve harici arayüzlerden gelen 1883 istekleri kesinlikle DROP edilir.
+  * Uzak MQTTS Portu: 8883 (TLS 1.2/1.3, mTLS veya sertifika doğrulama).
+
+
+================================================================================
+3. DAHİLİ MQTT BROKER IPC KONU (TOPIC) VE VERİ FORMATLARI
+================================================================================
+arena_agent ile lxc_agent arasındaki yerel mesajlaşma şu konular üzerinden yürütülür:
+
+A. Telemetri Akışı (arena_agent -> lxc_agent):
+--------------------------------------------------
+1. Konu: local/telemetry/gnss
+   - Açıklama: GPS konumu, hız, rota ve kilitlenme (fix) durumu.
+   - Format: JSON
+   - Örnek:
+     {
+       "timestamp": 1728825600,
+       "fix": true,
+       "latitude": 41.0082,
+       "longitude": 28.9784,
+       "speed_kmh": 62.4,
+       "altitude_m": 120.5,
+       "satellites": 9
+     }
+
+2. Konu: local/telemetry/system
+   - Açıklama: Cihazın kendi kritik çalışma parametreleri.
+   - Format: JSON
+   - Örnek:
+     {
+       "timestamp": 1728825600,
+       "cpu_temperature": 51.2,
+       "uptime_sec": 14200,
+       "memory_usage_pct": 42.1,
+       "wwan_signal_rssi": -68,
+       "voltage_mv": 12400
+     }
+
+B. Konfigürasyon ve Komut Akışı (lxc_agent <-> arena_agent):
+-----------------------------------------------------------
+1. Konu: local/cmd/config/set (lxc_agent -> arena_agent)
+   - Açıklama: Merkezden gelen veya lxc_agent'ın tetiklediği ayar değişikliği.
+   - Format: JSON
+   - Örnek:
+     {
+       "req_id": "cfg-2026-001",
+       "key": "system.hostname",
+       "value": "NB800-FILO-042"
+     }
+
+2. Konu: local/cmd/config/res (arena_agent -> lxc_agent)
+   - Açıklama: nb_config_set() işleminin sonucu.
+   - Format: JSON
+   - Örnek:
+     {
+       "req_id": "cfg-2026-001",
+       "status": "success",
+       "code": 0,
+       "message": "Configuration applied and committed"
+     }
+
+
+================================================================================
+4. lxc_agent İŞ MANTIĞI VE STORE-AND-FORWARD DEPOLAMA
+================================================================================
+lxc_agent, telemetri verilerinin kaybolmadan hedefe ulaşmasını garanti eden akıllı
+bir veri yönlendiricisidir.
+
+A. Veri Paketleme ve Zenginleştirme:
+   - Dahili broker'dan gelen gnss ve system verilerini harmanlar.
+   - Pakete araç benzersiz kimliği (Vehicle UUID / Plate), donanım seri no
+     ve yerel yüksek çözünürlüklü zaman damgası ekler.
+
+B. Çevrimdışı Tamponlama (Store-and-Forward Engine):
+   - Motor sürekli internet (MQTTS broker) bağlantı durumunu izler.
+   - Bağlantı VAR İKEN:
+     * Üretilen canlı telemetri anlık olarak uzak MQTTS broker'a gönderilir (QoS 0/1).
+     * Eğer geçmişten kalan çevrimdışı tampon dosyası varsa, canlı akışı
+       aksatmayacak şekilde kontrollü partilerle (throttled batch) boşaltılır.
+   - Bağlantı YOK İKEN:
+     * Tüm paketler konteyner içindeki kalıcı depolama alanına yazılır.
+     * Depolama Seçeneği: SQLite (WAL modunda) veya Segmentli JSONL dosyaları.
+     * Güç Kesintisi Koruması: Veriler ani kontak kapanmalarında bozulmayacak
+       şekilde (transaction-safe) disk üzerinde tutulur.
+
+C. Kota ve Dairesel Kuyruk (Circular Buffer / Max File Size Limit):
+   - Depolama dosyası için katı bir üst limit belirlenir (Örn: 20 MB veya 50 MB).
+   - Dosya limiti kontrolü:
+     * Yeni kayıt yazılmadan önce disk/dosya boyutu denetlenir.
+     * Limit dolduğunda FIFO mantığı işletilir: En eski kayıtlar silinir (drop oldest),
+       yeni üretilen taze konum ve durum bilgisi kuyruğa alınır.
+     * Bu yöntem, flash belleğin dolup işletim sistemini kilitlemesini engeller.
+
+
+================================================================================
+5. UZAK MQTTS VE GÜVENLİK MİMARİSİ
+================================================================================
+- Standart: MQTT v3.1.1 / v5.0 over TLS (Port 8883)
+- Sertifikalar: X.509 CA Kök Sertifikası ve Müşteri Sertifikası (mTLS)
+- Konu Hiyerarşisi:
+  * Canlı Telemetri: `fleet/{fleet_id}/vehicles/{vehicle_id}/telemetry`
+  * Cihaz Sağlığı / Alarmlar: `fleet/{fleet_id}/vehicles/{vehicle_id}/health`
+  * Çevrimdışı İletilen Geçmiş Veriler: `fleet/{fleet_id}/vehicles/{vehicle_id}/historical`
+  * Uzaktan Ayar Gönderme (Downlink): `fleet/{fleet_id}/vehicles/{vehicle_id}/config/set`
+- LWT (Last Will and Testament):
+  * Cihaz şebekeden aniden koptuğunda merkez broker diğer sistemleri uyarır:
+    `fleet/{fleet_id}/vehicles/{vehicle_id}/status` -> "offline"
+
+
+================================================================================
+6. BAŞLATMA SIRASI VE WATCHDOG (HATA TOLERANSI)
+================================================================================
+1. Araç Kontağı Açılır: NB800 güç alır.
+2. NRSW Boot Eder: Dahili ağ arayüzleri ve Dahili Mosquitto Broker (1883) başlar.
+3. arena_agent Başlar: Otomatik başlatılan Arena SDK betiği 127.0.0.1:1883'e
+   bağlanır, GNSS modülünü dinlemeye ve durum verisi toplamaya başlar.
+4. LXC Konteyneri Başlar: Alpine ayağa kalkar, lxc_agent servisi 192.168.100.1:1883
+   adresine bağlanır.
+5. Bağlantı Sağlık Kontrolü:
+   - arena_agent çökerse veya yanıt vermezse lxc_agent yeniden bağlanma döngüsüne girer.
+   - lxc_agent çökerse Alpine içindeki OpenRC/Supervisor servisi ajanı anında yeniden başlatır.
+   - Herhangi bir kilitlenmede donanım watchdog router'ı güvenli şekilde yeniden başlatır.
+
+
+================================================================================
+7. arena_agent ÇALIŞMA PARAMETRELERİNİN lxc_agent TARAFINDAN YÖNETİLMESİ
+   (HOT-RELOAD VE KALICILIK MİMARİSİ)
+================================================================================
+arena_agent'ın donanım okuma frekansı (örn: seyir halinde 1 sn, rölantide 30 sn),
+hız eşiği veya varsa kendi tampon sınırları gibi parametreleri lxc_agent tarafından
+hem çalışma anında (hot-reload) hem de cihaz açılıp kapandığında (kalıcı)
+değiştirilebilir.
+
+A. İletişim Konuları (Topics) ve Mesaj Şeması:
+----------------------------------------------
+- Ayar Gönderme Konusu (lxc_agent -> arena_agent):
+  local/arena/params/set
+- Durum / Onay Konusu (arena_agent -> lxc_agent):
+  local/arena/params/status
+
+Örnek Payload (JSON):
+{
+  "publish_interval_moving_sec": 2,
+  "publish_interval_idle_sec": 30,
+  "speed_threshold_kmh": 5,
+  "max_storage_mb": 50
+}
+
+B. Çalışma Zamanı Güncellemesi (Hot-Reload):
+-------------------------------------------
+1. arena_agent, 'nb_mqttlib_get_callback_message()' fonksiyonuyla
+   'local/arena/params/set' konusuna gelen mesajı yakalar.
+2. Gelen JSON içerisindeki değerler doğrudan çalışma döngüsü değişkenlerine
+   atanır (örn: telemetry_interval = json.publish_interval_moving_sec).
+3. Scripti veya cihazı yeniden başlatmaya gerek kalmadan, döngü anında yeni
+   frekansta çalışmaya devam eder.
+4. arena_agent, 'local/arena/params/status' konusuna güncel parametreleri
+   yayınlayarak lxc_agent'a işlemin başarılı olduğunu teyit eder (ACK).
+
+C. Yeniden Başlatma Dayanıklılığı (Kalıcılık / Persistence):
+------------------------------------------------------------
+Araç kontağı kapandığında ayarların kaybolmaması için iki yöntem desteklenir:
+
+1. Yöntem 1 (Tavsiye Edilen): MQTT "Retained Message" Deseni
+   - lxc_agent parametre paketini dahili brokera basarken 'retain: true'
+     bayrağı ile yayınlar.
+   - Dahili broker bu mesajı hafızasında saklar.
+   - Cihaz boot ettiğinde arena_agent açılıp 'local/arena/params/set' konusuna
+     abone olduğu anda, dahili broker en son kaydedilmiş ayar paketini otomatik
+     olarak arena_agent'a iletir. Dosya I/O karmaşası olmadan kalıcılık sağlanır.
+
+2. Yöntem 2: Yerel Yapılandırma Dosyası (Local Config File)
+   - arena_agent yeni parametreleri aldığında bunları bir dosyaya yazar
+     (fopen("/etc/config/arena_agent.json", "w")).
+   - Açılışta bu dosyayı kontrol eder; dosya varsa değerleri okur, yoksa fabrika
+     varsayılanlarıyla başlar.
+
+D. Depolama Sınırı (Max MB) Sorumluluğu:
+----------------------------------------
+Ana çevrimdışı telemetri deposu (Store-and-Forward kuyruğu) lxc_agent (Alpine)
+üzerinde yaşadığından, diskin dolmasını önleyen kota denetimi doğrudan lxc_agent
+tarafından yürütülür. arena_agent'a iletilen limitler sadece gerekirse arena_agent'ın
+kendi log dosyalarını sınırlamak için kullanılır.
+
+
+================================================================================
+8. OLAY GÜDÜMLÜ (EVENT-DRIVEN) MİKRO BETİKLER VE TRIGGER MİMARİSİ
+================================================================================
+arena_agent'ı tek ve monolitik bir betik yapmak yerine; donanım durum değişikliklerini
+(WAN kopması, GPS kilitlenmesi vb.) anında yakalamak için NetModule NRSW'nin
+yerleşik 'System Events', 'Triggers' ve 'Jobs' mekanizmasından faydalanılır.
+
+A. Görev Ayrımı (Sürekli Telemetri vs. Anlık Olaylar):
+------------------------------------------------------
+1. Sürekli Çalışan Servis (telemetry_daemon.are):
+   - Arka planda tek bir hafif döngü halinde çalışır.
+   - Belirlenen frekansta (örn. her 2 saniyede bir) GNSS koordinatlarını, hızını
+     ve CPU sıcaklığını okuyup 'local/telemetry/#' konularına basar.
+   - Şebeke koptu mu veya GPS kilitlendi mi gibi durum yönetimiyle uğraşmaz;
+     saf veriyi akıtır.
+
+2. Olay Güdümlü Mikro Betikler (Event Handlers - Ephemeral Scripts):
+   - Sürekli çalışmazlar, RAM tüketmezler.
+   - Yalnızca NRSW kernel seviyesinde bir durum değişikliği algılandığında bir
+     anlığına tetiklenirler, dahili brokera olayı bildirir ve hemen kapanırlar.
+
+B. NRSW Sistem Olayları (System Events) ve Eşleşen Tetikleyiciler:
+-----------------------------------------------------------------
+NRSW Web Arayüzü / CLI üzerinden şu Trigger & Job eşleşmeleri yapılır:
+
+| Olay Kodu | Olay Adı (Event) | Tetiklenen Job / Betik    | Açıklama                          |
+|:----------|:-----------------|:--------------------------|:----------------------------------|
+| 101       | wan-up           | on_wan_up.are             | Hücresel internet bağlantısı geldi |
+| 102       | wan-down         | on_wan_down.are           | İnternet bağlantısı koptu         |
+| 301       | gps-up           | on_gps_up.are             | GPS uydularına kilitlenildi (fix) |
+| 302       | gps-down         | on_gps_down.are           | GPS sinyali kayboldu (tünel vb.)  |
+| 505       | system-startup   | on_startup.are            | Cihaz ilk açılışını tamamladı     |
+
+*(Not: Ayrı ayrı dosyalar yerine tek bir 'on_event.are' betiği yazılıp, NRSW Job
+tanımında betik argümanı olarak 'wan up', 'wan down' vb. parametreler de aktarılabilir).*
+
+C. Olay Mesajlaşma Konuları (IPC Topics):
+-----------------------------------------
+Mikro betiklerin dahili broker'a bastığı bildirimler:
+
+1. Konu: local/event/wan
+   - Payload: {"state": "up", "interface": "Mobile1", "timestamp": 1728825600}
+   - Payload: {"state": "down", "interface": "Mobile1", "timestamp": 1728825615}
+
+2. Konu: local/event/gps
+   - Payload: {"state": "up", "satellites": 8, "timestamp": 1728825600}
+   - Payload: {"state": "down", "timestamp": 1728825620}
+
+3. Konu: local/event/system
+   - Payload: {"event": "startup", "timestamp": 1728825550}
+
+D. lxc_agent Açısından Kazanılan Büyük Avantaj (Sıfır Gecikmeli Tepki):
+----------------------------------------------------------------------
+- Polling Zorunluluğu Ortadan Kalkar:
+  lxc_agent, internetin varlığını test etmek için sürekli uzak broker'a ping
+  atmak veya bağlantı zaman aşımını (keepalive timeout) beklemek zorunda kalmaz.
+- Reaktif Çalışma (Zero-Latency Switching):
+  * 'local/event/wan -> down' mesajı dahili broker'a düştüğü milisaniyede,
+    lxc_agent derhal 'Store-and-Forward' (çevrimdışı dosyaya depolama) moduna geçer.
+  * 'local/event/wan -> up' mesajı geldiğinde ise anında uzak MQTTS broker'a
+    yeniden bağlanır ve birikmiş kuyruk dosyasını boşaltmaya (drain) başlar.
+- Veri Bütünlüğü:
+  GPS kilitlenmesi kaybolduğunda ('gps -> down') lxc_agent gelen son koordinatların
+  geçersiz olduğunu anında etiketler veya merkeze uyarı bayrağı iletir.
+
+
+================================================================================
+9. ANİ GÜÇ KESİNTİSİ (HARD POWER CUT) VE VERİ BÜTÜNLÜĞÜ KORUMASI
+================================================================================
+Cihaz doğrudan araç kontak hattına bağlı olduğunda, araç stop edildiğinde NB800'ün
+elektriği anında (hard cut) kesilir. İşletim sisteminin kapanma scriptlerini
+(system-poweroff, system-rebooting) çalıştırma fırsatı olmaz. Bu durum sistemde
+üç temel zorluk yaratır ve şu mimari kurallarla çözülür:
+
+A. Bozulmaz (Crash-Resilient) Depolama: SQLite WAL Modu
+-------------------------------------------------------
+Veri yazma anında elektrik kesildiğinde dosya sisteminin ve veritabanının
+bozulmasını (corruption) engellemek için:
+- lxc_agent içerisindeki çevrimdışı depo mutlaka SQLite'ın WAL (Write-Ahead Logging)
+  modunda çalıştırılır:
+  * PRAGMA journal_mode = WAL;
+  * PRAGMA synchronous = NORMAL;
+- WAL mimarisinde yazma işlemleri atomiktir; elektrik yazma tam ortasında kesilse
+  bile diskte bozuk veri kalmaz.
+- Kontak tekrar açıldığında SQLite açılışta yarım kalmış son işlemi otomatik
+  olarak geri sarar (auto-rollback); veritabanı %100 sağlam ve tutarlı kalır.
+- Düz JSONL dosyası kullanılacaksa her satır atomik yazılmalı, açılışta son satırın
+  bütünlüğü doğrulanmalı ve eksikse o satır budanmalıdır (truncate).
+
+B. RAM Tamponu vs. Flash Bellek Ömrü (Wear-Leveling) Dengesi
+------------------------------------------------------------
+- Kontağın ne zaman kapatılacağı önceden bilinemez. Veriler uzun süre (örn: 1 dk)
+  RAM'de bekletilirse kontak kapandığında son 1 dakikalık sürüş kaybolur.
+- Diğer yandan saniyede 1 kez doğrudan flash belleğe 'fsync' yapmak eMMC/NAND
+  ömrünü hızla tüketir.
+- Optimum Denge: Veriler maksimum 2 ila 5 saniyede bir veya 3-5 kayıtta bir
+  diske atomik commit edilir. Böylece kontak kapandığında maksimum kayıp sadece
+  son 2-3 saniye ile sınırlı kalır ve flash aşınması minimize edilir.
+
+C. Zaman Senkronizasyonu ve 1970 Yılı Problemi (RTC Yokluğu)
+------------------------------------------------------------
+Elektrik tamamen kesildiği için cihaz her açılışta saati 01.01.1970 00:00:00
+olarak başlatabilir. Uydudan veya NTP'den gerçek saat gelene kadar ilk 15-40 sn
+geçer.
+- 508 (system-time-updated) Olayının Kullanımı:
+  1. lxc_agent, ilk açılışta ürettiği telemetrileri CPU'nun çalışma süresine
+     (Monotonic Time: t0 + saniye) göre geçici olarak etiketler.
+  2. Dahili broker'dan 'local/event/time -> sync' bildirimi (508 olayından)
+     geldiği anda, gerçek zaman farkı (offset) hesaplanır.
+  3. İlk 30 saniyelik bu geçici kayıtlara gerçek zaman damgası geriye dönük
+     işlenir (timestamp back-patching).
+  4. Böylece merkeze 1970 tarihli geçersiz telemetri gitmesi kesin olarak önlenir.
+
+D. Açılışta Kendi Kendini İyileştirme Sırası (Self-Healing on Boot)
+-------------------------------------------------------------------
+Kontak açıldığında lxc_agent aşağıdaki sırayla ayağa kalkar:
+1. Depo Bütünlük Kontrolü (Integrity Check):
+   - SQLite bütünlüğü doğrulanır, yarım kalan işlem varsa otomatik toparlanır.
+   - Kuyruktaki henüz gönderilmemiş eski paket sayısı belirlenir.
+2. Dahili Broker'a Bağlantı:
+   - 'local/event/#' ve 'local/telemetry/#' konularına abone olunur.
+   - Zaman senkronizasyonu ('local/event/time') ve internet durumu ('local/event/wan')
+     beklenir.
+3. Boşaltma ve Canlı Akış:
+   - İnternet erişimi ('wan -> up') teyit edildiği anda, önce eski birikmiş
+     kuyruk partiler halinde merkeze gönderilir, ardından canlı akış sürdürülür.
+
+
+================================================================================
+10. ÜRETİLECEK .are BETİKLERİ ENVANTERİ VE KODLAMA REHBERİ
+    (UYGULAMA VE KODLAMA ŞARTNAMESİ)
+================================================================================
+Yeni sohbette doğrudan kodlama aşamasına geçildiğinde, üretilecek dosyaların
+kapsamı, görevleri ve kullanılacak Arena API fonksiyonları aşağıda tanımlanmıştır:
+
+A. Üretilecek Dosya Listesi ve Çalışma Modelleri:
+-------------------------------------------------
+1. telemetry_daemon.are (Ana Arka Plan Servisi):
+   - Çalışma Tipi: Sürekli çalışan daemon (NRSW SDK autostart / startup job).
+   - Görevleri:
+     * 127.0.0.1:1883 (dahili broker) bağlantısını kurar ve canlı tutar.
+     * 'local/arena/params/set' konusunu dinler (hot-reload parametreleri).
+     * 'local/cmd/config/set' konusunu dinler (uzaktan gelen router ayarları).
+     * Belirlenen aralıklarla (default: 2 sn) 'nb_status("location")' ve
+       'nb_status("system")' okur.
+     * Verileri 'sprintf()' ile JSON'a çevirip 'local/telemetry/gnss' ve
+       'local/telemetry/system' konularına basar.
+     * Gelen config isteklerini 'nb_config_set()' ile uygular ve sonucunu
+       'local/cmd/config/res' konusuna bildirir.
+
+2. on_wan_up.are (Olay Betiği - Trigger 101):
+   - Çalışma Tipi: Ephemeral (sadece olay anında tetiklenir, 1 sn sürer ve biter).
+   - Görevi: Dahili broker'a bağlanır, 'local/event/wan' konusuna '{"state":"up"}'
+     basar ve bağlantıyı kapatıp sonlanır.
+
+3. on_wan_down.are (Olay Betiği - Trigger 102):
+   - Çalışma Tipi: Ephemeral.
+   - Görevi: 'local/event/wan' konusuna '{"state":"down"}' basar ve sonlanır.
+
+4. on_gps_up.are (Olay Betiği - Trigger 301):
+   - Çalışma Tipi: Ephemeral.
+   - Görevi: 'local/event/gps' konusuna '{"state":"up"}' basar ve sonlanır.
+
+5. on_gps_down.are (Olay Betiği - Trigger 302):
+   - Çalışma Tipi: Ephemeral.
+   - Görevi: 'local/event/gps' konusuna '{"state":"down"}' basar ve sonlanır.
+
+6. on_time_sync.are (Olay Betiği - Trigger 508):
+   - Çalışma Tipi: Ephemeral.
+   - Görevi: 'local/event/time' konusuna '{"state":"sync", "timestamp": ...}'
+     basar ve sonlanır.
+
+*(Opsiyonel Mimari Not: 2-6 arasındaki mikro betikler ayrı dosyalar yerine,
+tek bir 'event_handler.are' dosyası yapılıp Job parametreleri olarak
+'wan up', 'wan down' argümanlarıyla (argv[1], argv[2]) da çalıştırılabilir).*
+
+B. Kullanılacak Arena SDK (nb_*) Fonksiyon Haritası:
+---------------------------------------------------
+- MQTT İşlemleri:
+  * nb_mqttlib_new(client_id, clean_session) -> mh handle döner.
+  * nb_mqttlib_connect(mh, "127.0.0.1", 1883, keepalive) -> bağlantı açar.
+  * nb_mqttlib_publish(mh, topic, message, qos, retain, properties) -> veri basar.
+  * nb_mqttlib_subscribe(mh, topic, qos) -> konu dinler.
+  * nb_mqttlib_get_callback_message(mh, timeout) -> gelen mesajı yakalar.
+  * nb_mqttlib_disconnect(mh) & nb_mqttlib_free(mh) -> kapatma/temizleme.
+
+- Donanım Telemetrisi:
+  * nb_status("location") -> lat, lon, speed, altitude, in_service bilgileri.
+  * nb_status("system") -> temperature (CPU sıcaklığı), uptime, load değerleri.
+
+- Sistem Konfigürasyonu:
+  * nb_config_get(key) -> mevcut ayarı okur.
+  * nb_config_set(config_string) -> yeni ayarı uygular.
+  * nb_config_done() -> ayarları kalıcı olarak yazar/commit eder.
+
+- Sistem Loglama:
+  * nb_syslog(priority, message) -> router syslog'una iz bırakır.
+
+C. Arena Dili İçin Kritik Kodlama Kuralları:
+--------------------------------------------
+1. JSON Serileştirme (Encoding):
+   - Arena'da 'json_encode()' fonksiyonu yoktur.
+   - JSON metinleri 'sprintf()' kullanılarak ve sayı/metin biçimleri dikkatlice
+     ayarlanarak inşa edilir (Örn: sprintf("{\"lat\": %.6f, \"speed\": %.1f}", ...)).
+2. Basit JSON Ayrıştırma (Parsing):
+   - Gelen ayar mesajları için karmaşık kütüphaneler yerine, Arena'nın 'strstr',
+     'substr' veya 'split' fonksiyonları ile basit anahtar/değer ayıklama yapılır.
+3. Hata Yakalama (Defensive Programming):
+   - Broker'a bağlanamama veya sensörün boş dönmesi (void) durumlarına karşı
+     'is_void()', 'mh < 0' kontrolleri mutlaka yapılır, betiğin çökmesi önlenir.
+4. Kaynak Temizliği:
+   - Kısa ömürlü olay betiklerinde 'nb_mqttlib_disconnect()' ve 'nb_mqttlib_free()'
+     çağrılarak açık soket veya bellek sızıntısı (leak) bırakılmaz.
+================================================================================
+
+
+
+

@@ -1,0 +1,578 @@
+/*
+ * ============================================================================
+ * NetModule NB800 Router - Arena Scripting Language
+ * Dosya Adi: telemetry_daemon.are
+ * 
+ * ISLEV VE GOREV TANIMI:
+ * Bu betik, NetModule NB800 telemetri sisteminin Host / NRSW katmanindaki
+ * ana arka plan servisidir (arena_agent). 
+ * 
+ * Gorevleri:
+ * 1. 127.0.0.1:1883 dahili Mosquitto MQTT brokerina baglanir ve baglantiyi
+ *    surekli canli tutar.
+ * 2. local/arena/params/set konusunu dinleyerek calisma frekansi ve hiz esigi
+ *    parametrelerini calisma aninda (hot-reload) dinamik olarak gunceller.
+ * 3. local/cmd/config/set konusunu dinleyerek merkezden gelen router ayarlarini
+ *    nb_config_set ve nb_config_done fonksiyonlariyla uygular, sonucu
+ *    local/cmd/config/res konusuna iletir.
+ * 4. Belirlenen periyotlarda (hareket halinde default 2 sn, rolantide default 30 sn)
+ *    nb_status location ve system verilerini okur.
+ * 5. Elde edilen verileri JSON formatina donusturerek local/telemetry/gnss ve
+ *    local/telemetry/system konularina yayinlar.
+ * 6. Proaktif Hucresel Sinyal Takibi: Hucresel sinyal seviyesini (RSSI) her
+ *    dongude denetler; sinyal koptugunda (-110 dBm alti veya 0/99) NRSW kernel
+ *    zaman asimini beklemeden aninda local/event/wan konusuna down bildirir.
+ * 
+ * TETIKLEYICI (TRIGGER) BILGISI:
+ * Bu betik olay gudumlu degil, surekli calisan bir arka plan servisidir
+ * (Continuous Daemon).
+ * NRSW Web Arayuzu veya CLI uzerinden:
+ *   System -> SDK -> Scripts altinda yuklenir.
+ *   System -> SDK -> Jobs altinda Startup Job olarak tanimlanir
+ *   veya SDK Autostart mekanizmasi ile sistem acilisinda bir kez baslatilir.
+ * ============================================================================
+ */
+
+/* Broker Baglanti Sabitleri */
+BROKER_HOST = "127.0.0.1";
+BROKER_PORT = 1883;
+BROKER_KEEPALIVE = 60;
+CLIENT_ID   = "nb800_telemetry_daemon";
+clean_session = true;
+
+/* Konu (Topic) Sabitleri */
+TOPIC_TELEMETRY_GNSS   = "local/telemetry/gnss";
+TOPIC_TELEMETRY_SYSTEM = "local/telemetry/system";
+TOPIC_EVENT_WAN        = "local/event/wan";
+TOPIC_EVENT_VPN        = "local/event/vpn";
+TOPIC_PARAMS_SET       = "local/arena/params/set";
+TOPIC_PARAMS_STATUS    = "local/arena/params/status";
+TOPIC_CONFIG_SET       = "local/cmd/config/set";
+TOPIC_CONFIG_RES       = "local/cmd/config/res";
+
+/* Calisma Parametreleri ve Varsayilan Degerler */
+publish_interval_moving_sec = 2;
+publish_interval_idle_sec   = 30;
+speed_threshold_kmh         = 5.0;
+max_storage_mb              = 50;
+current_interval_sec        = 2;
+last_publish_time           = 0;
+
+/* Proaktif Sinyal ve Baglanti Durumu Takibi */
+RSSI_THRESHOLD_CRITICAL     = -110;
+last_wan_state              = "unknown";
+last_vpn_state              = "unknown";
+
+/* Basit JSON Ayrirma Yardimci Fonksiyonu */
+string json_get_value(string json_str, string key_name) {
+    needle = strcat('"', key_name, '"');
+    pos = strstr(json_str, needle);
+    if (is_void(pos)) {
+        return "";
+    }
+    
+    sub = substr(json_str, pos + strlen(needle));
+    cpos = strstr(sub, ":");
+    if (is_void(cpos)) {
+        return "";
+    }
+    
+    val_part = trim(substr(sub, cpos + 1));
+    
+    /* Tirnak icindeki metin deger kontrolu */
+    q1 = strstr(val_part, '"');
+    if (!is_void(q1) && q1 == 0) {
+        q2 = strstr(substr(val_part, 1), '"');
+        if (!is_void(q2)) {
+            return substr(val_part, 1, q2);
+        }
+    }
+    
+    /* Sayisal veya boolean deger */
+    endpos = strlen(val_part);
+    for (i = 0; i < strlen(val_part); i++) {
+        ch = substr(val_part, i, 1);
+        if (ch == "," || ch == "}" || ch == " " || ch == "\r" || ch == "\n") {
+            endpos = i;
+            break;
+        }
+    }
+    return substr(val_part, 0, endpos);
+}
+
+/* Parametre Durumu Yayini (ACK) */
+void publish_params_status(int mh) {
+    status_payload = sprintf('{"publish_interval_moving_sec": %d, "publish_interval_idle_sec": %d, "speed_threshold_kmh": %.1f, "max_storage_mb": %d, "status": "active"}',
+        publish_interval_moving_sec,
+        publish_interval_idle_sec,
+        speed_threshold_kmh,
+        max_storage_mb);
+    nb_mqttlib_publish(mh, TOPIC_PARAMS_STATUS, status_payload, 0, 1, mkarray());
+    nb_syslog("Telemetri parametre durumu onaylandi: %s", status_payload);
+}
+
+/* Hot-Reload Parametre Guncelleme Islemi */
+void handle_params_update(int mh, string payload) {
+    val_moving = json_get_value(payload, "publish_interval_moving_sec");
+    val_idle   = json_get_value(payload, "publish_interval_idle_sec");
+    val_speed  = json_get_value(payload, "speed_threshold_kmh");
+    val_storage = json_get_value(payload, "max_storage_mb");
+    
+    if (strlen(val_moving) > 0) {
+        publish_interval_moving_sec = cast_to(val_moving, "int");
+    }
+    if (strlen(val_idle) > 0) {
+        publish_interval_idle_sec = cast_to(val_idle, "int");
+        current_interval_sec = publish_interval_idle_sec;
+    }
+    if (strlen(val_speed) > 0) {
+        speed_threshold_kmh = cast_to(val_speed, "float");
+    }
+    if (strlen(val_storage) > 0) {
+        max_storage_mb = cast_to(val_storage, "int");
+    }
+    
+    nb_syslog("Telemetri parametreleri guncellendi (Hot-Reload). Hareket: %d sn, Rolanti: %d sn, Hiz Esigi: %.1f km/s",
+        publish_interval_moving_sec, publish_interval_idle_sec, speed_threshold_kmh);
+        
+    publish_params_status(mh);
+}
+
+/* Uzaktan Router Konfigurasyon Islemi */
+void handle_config_command(int mh, string payload) {
+    req_id = json_get_value(payload, "req_id");
+    key    = json_get_value(payload, "key");
+    val    = json_get_value(payload, "value");
+    
+    if (strlen(key) == 0) {
+        res_payload = sprintf('{"req_id": "%s", "status": "error", "code": 1, "message": "Eksik key alani"}', req_id);
+        nb_mqttlib_publish(mh, TOPIC_CONFIG_RES, res_payload, 1, 0, mkarray());
+        return;
+    }
+    
+    cfg_cmd = strcat(key, "=", val);
+    nb_syslog("Konfigurasyon komutu uygulaniyor: %s (Req: %s)", cfg_cmd, req_id);
+    
+    ret = nb_config_set(cfg_cmd);
+    if (ret == 0) {
+        nb_config_done();
+        res_payload = sprintf('{"req_id": "%s", "status": "success", "code": 0, "message": "Configuration applied and committed"}', req_id);
+    } else {
+        res_payload = sprintf('{"req_id": "%s", "status": "error", "code": %d, "message": "nb_config_set basarisiz"}', req_id, ret);
+    }
+    
+    nb_mqttlib_publish(mh, TOPIC_CONFIG_RES, res_payload, 1, 0, mkarray());
+    nb_syslog("Konfigurasyon yaniti iletildi: %s", res_payload);
+}
+
+/* Struct icinden guvenli alan okuma */
+mixed safe_get_field(mixed s, string name) {
+    if (is_void(s) || !is_struct(s)) return ();
+    v = struct_get(s, name);
+    if (!is_void(v)) return v;
+    v = struct_get(s, toupper(name));
+    if (!is_void(v)) return v;
+    v = struct_get(s, tolower(name));
+    if (!is_void(v)) return v;
+    return ();
+}
+
+/* Struct alan adlarinda fuzzy arama (ornek: alt, sat, speed) */
+mixed search_field_contains(mixed s, string sub_name) {
+    if (is_void(s) || !is_struct(s)) return ();
+    fields = struct_fields(s);
+    if (!is_array(fields)) return ();
+    sub_lower = tolower(sub_name);
+    for (i = 0; i < length(fields); i++) {
+        f = fields[i];
+        if (!is_void(strstr(tolower(f), sub_lower))) {
+            return struct_get(s, f);
+        }
+    }
+    return ();
+}
+
+/* Struct alan adlarini virgülle ayrilmis metne cevirme (Loglama icin) */
+string dump_struct_keys(mixed s) {
+    if (is_void(s) || !is_struct(s)) return "void";
+    fields = struct_fields(s);
+    if (!is_array(fields)) return "not_array";
+    res = "";
+    for (i = 0; i < length(fields); i++) {
+        if (i > 0) res = strcat(res, ", ");
+        res = strcat(res, fields[i]);
+    }
+    return res;
+}
+
+/* Struct icindeki key ve valuelari loglamak icin yardimci fonksiyon */
+string dump_struct_debug(mixed s) {
+    if (is_void(s) || !is_struct(s)) return "void";
+    fields = struct_fields(s);
+    if (!is_array(fields)) return "not_array";
+    res = "";
+    for (i = 0; i < length(fields); i++) {
+        f = fields[i];
+        val = cast_to(struct_get(s, f), "string");
+        if (i > 0) res = strcat(res, ", ");
+        res = strcat(res, sprintf("%s=%s", f, val));
+    }
+    return res;
+}
+
+/* GNSS Telemetri Okuma ve Yayinlama */
+float publish_gnss_telemetry(int mh, int now_ts) {
+    current_speed = 0.0;
+    latitude = 0.0;
+    longitude = 0.0;
+    altitude = 0.0;
+    satellites = 0;
+    is_fixed = 0;
+    
+    /* 1. Kaynak: nb_status("gnss") (Donanim seviyesi GPS/GNSS durumu) */
+    gnss_mod = nb_status("gnss");
+    if (!is_void(gnss_mod) && is_struct(gnss_mod)) {
+        v_lat = search_field_contains(gnss_mod, "lat");
+        if (!is_void(v_lat)) latitude = cast_to(v_lat, "float");
+        
+        v_lon = search_field_contains(gnss_mod, "lon");
+        if (!is_void(v_lon)) longitude = cast_to(v_lon, "float");
+        
+        v_alt = search_field_contains(gnss_mod, "alt");
+        if (is_void(v_alt)) v_alt = search_field_contains(gnss_mod, "elev");
+        if (!is_void(v_alt)) altitude = cast_to(v_alt, "float");
+        
+        v_sat = search_field_contains(gnss_mod, "sat");
+        if (!is_void(v_sat)) satellites = cast_to(v_sat, "int");
+        
+        v_spd = search_field_contains(gnss_mod, "speed");
+        if (!is_void(v_spd)) current_speed = cast_to(v_spd, "float");
+        
+        v_fix = search_field_contains(gnss_mod, "fix");
+        if (!is_void(v_fix) && (v_fix == true || v_fix == 1 || v_fix == "1" || v_fix == "true" || v_fix == "valid")) {
+            is_fixed = 1;
+        }
+    }
+    
+    /* 2. Kaynak: nb_status("location") (Ters cografi adres ve konum servisi) */
+    loc = nb_status("location");
+    if (!is_void(loc) && is_struct(loc)) {
+        if (latitude == 0.0) {
+            v_lat = search_field_contains(loc, "lat");
+            if (!is_void(v_lat)) latitude = cast_to(v_lat, "float");
+        }
+        if (longitude == 0.0) {
+            v_lon = search_field_contains(loc, "lon");
+            if (!is_void(v_lon)) longitude = cast_to(v_lon, "float");
+        }
+        if (altitude == 0.0) {
+            v_alt = search_field_contains(loc, "alt");
+            if (!is_void(v_alt)) altitude = cast_to(v_alt, "float");
+        }
+        if (satellites == 0) {
+            v_sat = search_field_contains(loc, "sat");
+            if (!is_void(v_sat)) satellites = cast_to(v_sat, "int");
+        }
+        if (current_speed == 0.0) {
+            v_spd = search_field_contains(loc, "speed");
+            if (!is_void(v_spd)) current_speed = cast_to(v_spd, "float");
+        }
+        if (is_fixed == 0) {
+            v_stat = struct_get(loc, "LOCATION_STATUS");
+            if (!is_void(v_stat) && (v_stat == "2" || v_stat == "3" || v_stat == "fix" || v_stat == "valid")) {
+                is_fixed = 1;
+            }
+        }
+    }
+    
+    if (satellites >= 3 || (latitude != 0.0 && longitude != 0.0)) {
+        is_fixed = 1;
+    }
+    
+    fix_str = (is_fixed == 1) ? "true" : "false";
+    gnss_json = sprintf('{"timestamp": %d, "fix": %s, "latitude": %.6f, "longitude": %.6f, "speed_kmh": %.1f, "altitude_m": %.1f, "satellites": %d}',
+        now_ts, fix_str, latitude, longitude, current_speed, altitude, satellites);
+        
+    nb_mqttlib_publish(mh, TOPIC_TELEMETRY_GNSS, gnss_json, 0, 0, mkarray());
+    return current_speed;
+}
+
+/* Proaktif Sinyal Seviyesi ve Baglanti Kontrolu */
+void check_wan_signal_state(int mh, int rssi, int now_ts) {
+    /* Sinyal seviyesi kritik esik kontrolu:
+     * RSSI <= -110 dBm, 0 veya 99 (bilinmeyen/kayip) durumunda sinyal kesilmis sayilir.
+     */
+    is_lost = (rssi <= RSSI_THRESHOLD_CRITICAL || rssi == 0 || rssi == 99 || rssi == -120);
+    
+    if (is_lost) {
+        if (last_wan_state != "down") {
+            last_wan_state = "down";
+            ev_payload = sprintf('{"state": "down", "reason": "signal_lost", "interface": "Mobile1", "rssi": %d, "timestamp": %d}', rssi, now_ts);
+            nb_mqttlib_publish(mh, TOPIC_EVENT_WAN, ev_payload, 0, 1, mkarray());
+            nb_syslog("Proaktif Sinyal Takibi: Hucresel sinyal kayboldu (RSSI: %d dBm). local/event/wan -> down bildirildi.", rssi);
+        }
+    } else {
+        if (last_wan_state == "down") {
+            last_wan_state = "up";
+            ev_payload = sprintf('{"state": "up", "reason": "signal_recovered", "interface": "Mobile1", "rssi": %d, "timestamp": %d}', rssi, now_ts);
+            nb_mqttlib_publish(mh, TOPIC_EVENT_WAN, ev_payload, 0, 1, mkarray());
+            nb_syslog("Proaktif Sinyal Takibi: Hucresel sinyal geri geldi (RSSI: %d dBm). local/event/wan -> up bildirildi.", rssi);
+        } else if (last_wan_state == "unknown") {
+            last_wan_state = "up";
+            ev_payload = sprintf('{"state": "up", "reason": "signal_detected", "interface": "Mobile1", "rssi": %d, "timestamp": %d}', rssi, now_ts);
+            nb_mqttlib_publish(mh, TOPIC_EVENT_WAN, ev_payload, 0, 1, mkarray());
+            nb_syslog("Proaktif Sinyal Takibi: Hucresel sinyal tespit edildi (RSSI: %d dBm). local/event/wan -> up bildirildi.", rssi);
+        }
+    }
+}
+
+/* Sistem Sagligi Telemetri Okuma ve Yayinlama */
+void publish_system_telemetry(int mh, int now_ts) {
+    cpu_temp = 0.0;
+    uptime_sec = 0;
+    mem_usage = 0.0;
+    rssi = -70;
+    voltage = 12000;
+    hydra_str = "unknown";
+    
+    sys = nb_status("system");
+    if (!is_void(sys) && is_struct(sys)) {
+        /* Donanim Gozetmeni (HYDRA) Durumu */
+        v_hydra = struct_get(sys, "HYDRA");
+        if (!is_void(v_hydra)) hydra_str = cast_to(v_hydra, "string");
+
+        /* Sicaklik: Sistemden ne okunuyorsa ham degeri aktar (Uretici firmware duzeltmesi gelene kadar) */
+        v_temp = struct_get(sys, "TEMPERATURE");
+        if (!is_void(v_temp)) {
+            cpu_temp = cast_to(v_temp, "float");
+        } else {
+            cpu_temp = 0.0;
+        }
+        
+        /* Uptime: NRSW dakika cinsinden verir (orn: 10 dk), saniyeye ceviriyoruz */
+        v_up = struct_get(sys, "UPTIME");
+        if (!is_void(v_up)) uptime_sec = cast_to(v_up, "int") * 60;
+        
+        /* Dinamik RAM Kullanimi Hesaplama (MEM_TOTAL & MEM_FREE) */
+        v_mem_tot = struct_get(sys, "MEM_TOTAL");
+        v_mem_free = struct_get(sys, "MEM_FREE");
+        if (!is_void(v_mem_tot) && !is_void(v_mem_free)) {
+            tot_val = cast_to(v_mem_tot, "float");
+            free_val = cast_to(v_mem_free, "float");
+            if (tot_val > 0.0) {
+                mem_usage = ((tot_val - free_val) / tot_val) * 100.0;
+            }
+        }
+        if (mem_usage <= 0.0) {
+            v_mem = search_field_contains(sys, "usage");
+            if (!is_void(v_mem)) mem_usage = cast_to(v_mem, "float");
+            else mem_usage = 0.0;
+        }
+    }
+    
+    wwan = nb_status("wwan");
+    if (is_void(wwan) || !is_struct(wwan)) {
+        wwan = nb_status("wan");
+    }
+    v_imei = ();
+    if (!is_void(wwan) && is_struct(wwan)) {
+        v_rssi = search_field_contains(wwan, "rssi");
+        if (is_void(v_rssi)) v_rssi = search_field_contains(wwan, "signal");
+        if (is_void(v_rssi)) v_rssi = search_field_contains(wwan, "csq");
+        if (!is_void(v_rssi)) rssi = cast_to(v_rssi, "int");
+
+        v_imei = struct_get(wwan, "MOBILE1_IMEI");
+        if (is_void(v_imei)) v_imei = search_field_contains(wwan, "imei");
+    }
+    
+    if (is_void(v_imei)) {
+        modem = nb_status("modem");
+        if (!is_void(modem) && is_struct(modem)) {
+            v_imei = search_field_contains(modem, "imei");
+        }
+    }
+    
+    /* OpenVPN Tünel Durumu Sorgulama */
+    vpn_connected = 0;
+    vpn_ip_str = "";
+    vpn_st = nb_status("openvpn");
+    if (!is_void(vpn_st) && is_struct(vpn_st)) {
+        /* Oncelikle OPENVPN1_STATUS veya OPENVPN0_STATUS kontrol et */
+        v_vpn_st = struct_get(vpn_st, "OPENVPN1_STATUS");
+        if (is_void(v_vpn_st)) v_vpn_st = struct_get(vpn_st, "OPENVPN0_STATUS");
+        if (is_void(v_vpn_st)) v_vpn_st = struct_get(vpn_st, "OPENVPN_STATUS");
+        
+        if (!is_void(v_vpn_st)) {
+            str_vpn_st = tolower(cast_to(v_vpn_st, "string"));
+            if (str_vpn_st == "connected" || str_vpn_st == "up" || str_vpn_st == "1" || str_vpn_st == "running" || str_vpn_st == "established") {
+                vpn_connected = 1;
+            }
+        }
+        
+        /* Eger bulunamadiysa tum alanlari tara (cipher haric) */
+        if (vpn_connected == 0) {
+            fields = struct_fields(vpn_st);
+            if (is_array(fields)) {
+                for (i = 0; i < length(fields); i++) {
+                    f = fields[i];
+                    f_low = tolower(f);
+                    if (!is_void(strstr(f_low, "status")) || !is_void(strstr(f_low, "state"))) {
+                        val_str = tolower(cast_to(struct_get(vpn_st, f), "string"));
+                        if (val_str == "connected" || val_str == "up" || val_str == "running" || val_str == "established") {
+                            vpn_connected = 1;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        /* IP tespiti: OPENVPN1_LOCAL_IP, OPENVPN1_IP, OPENVPN1_ADDRESS vb. */
+        v_vpn_ip = struct_get(vpn_st, "OPENVPN1_LOCAL_IP");
+        if (is_void(v_vpn_ip)) v_vpn_ip = struct_get(vpn_st, "OPENVPN0_LOCAL_IP");
+        if (is_void(v_vpn_ip)) v_vpn_ip = struct_get(vpn_st, "OPENVPN1_IP");
+        if (is_void(v_vpn_ip)) v_vpn_ip = struct_get(vpn_st, "OPENVPN1_ADDRESS");
+        if (!is_void(v_vpn_ip)) {
+            vpn_ip_str = cast_to(v_vpn_ip, "string");
+        } else {
+            /* Alanlar icinde local_ip veya _ip arayalim ama cipher icermeyen */
+            fields = struct_fields(vpn_st);
+            if (is_array(fields)) {
+                for (i = 0; i < length(fields); i++) {
+                    f = fields[i];
+                    f_low = tolower(f);
+                    if (is_void(strstr(f_low, "cipher")) && (!is_void(strstr(f_low, "local_ip")) || !is_void(strstr(f_low, "_ip")) || !is_void(strstr(f_low, "address")))) {
+                        val_ip = cast_to(struct_get(vpn_st, f), "string");
+                        if (!is_void(strstr(val_ip, "."))) {
+                            vpn_ip_str = val_ip;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    /* Tunel bagli fakat IP algilanamadiysa tun0 varsayilan IP degerini ata */
+    if (vpn_connected == 1 && strlen(vpn_ip_str) == 0) {
+        vpn_ip_str = "10.8.0.2";
+    }
+    vpn_conn_str = (vpn_connected == 1) ? "true" : "false";
+
+    /* VPN durumunu senkronize et ve local/event/vpn yayinla */
+    if (vpn_connected == 1 && last_vpn_state != "up") {
+        last_vpn_state = "up";
+        ev_vpn = sprintf('{"state": "up", "interface": "tun0", "ip": "%s", "timestamp": %d}', vpn_ip_str, now_ts);
+        nb_mqttlib_publish(mh, TOPIC_EVENT_VPN, ev_vpn, 0, 1, mkarray());
+        nb_syslog("OpenVPN durumu senkronize edildi: local/event/vpn -> up (%s)", vpn_ip_str);
+    } else if (vpn_connected == 0 && last_vpn_state == "up") {
+        last_vpn_state = "down";
+        ev_vpn = sprintf('{"state": "down", "interface": "tun0", "timestamp": %d}', now_ts);
+        nb_mqttlib_publish(mh, TOPIC_EVENT_VPN, ev_vpn, 0, 1, mkarray());
+        nb_syslog("OpenVPN tuneli koptu: local/event/vpn -> down");
+    }
+
+    /* Proaktif sinyal denetimini calistir */
+    check_wan_signal_state(mh, rssi, now_ts);
+    
+    if (!is_void(v_imei) && strlen(cast_to(v_imei, "string")) > 0) {
+        sys_json = sprintf('{"timestamp": %d, "cpu_temperature": %.1f, "uptime_sec": %d, "memory_usage_pct": %.1f, "wwan_signal_rssi": %d, "voltage_mv": %d, "vpn_connected": %s, "vpn_ip": "%s", "imei": "%s", "hydra": "%s"}',
+            now_ts, cpu_temp, uptime_sec, mem_usage, rssi, voltage, vpn_conn_str, vpn_ip_str, cast_to(v_imei, "string"), hydra_str);
+    } else {
+        sys_json = sprintf('{"timestamp": %d, "cpu_temperature": %.1f, "uptime_sec": %d, "memory_usage_pct": %.1f, "wwan_signal_rssi": %d, "voltage_mv": %d, "vpn_connected": %s, "vpn_ip": "%s", "hydra": "%s"}',
+            now_ts, cpu_temp, uptime_sec, mem_usage, rssi, voltage, vpn_conn_str, vpn_ip_str, hydra_str);
+    }
+        
+    nb_mqttlib_publish(mh, TOPIC_TELEMETRY_SYSTEM, sys_json, 0, 0, mkarray());
+}
+
+/* Ana Daemon Calisma Dongusu */
+nb_syslog("NB800 Telemetry Daemon baslatiliyor...");
+
+/* Sistem, WWAN ve OpenVPN durum ayrintilarini syslog ile tespit et */
+nb_syslog("STATUS system dump: %s", dump_struct_debug(nb_status("system")));
+nb_syslog("STATUS wwan alanlari: %s", dump_struct_keys(nb_status("wwan")));
+nb_syslog("STATUS openvpn dump: %s", dump_struct_debug(nb_status("openvpn")));
+
+while (true) {
+    mh = nb_mqttlib_new(CLIENT_ID, clean_session);
+    if (mh < 0) {
+        nb_syslog("HATA: MQTT istemcisi olusturulamadi (Kod: %d), 5 sn sonra yeniden denenecek.", mh);
+        sleep(5);
+        continue;
+    }
+    
+    conn = nb_mqttlib_connect(mh, BROKER_HOST, BROKER_PORT, BROKER_KEEPALIVE, mkarray());
+    if (conn != 0) {
+        nb_syslog("HATA: Dahili broker baglantisi basarisiz (Kod: %d), 5 sn sonra denenecek.", conn);
+        nb_mqttlib_free(mh);
+        sleep(5);
+        continue;
+    }
+    
+    /* Baglanti onayini (CONNACK) dogrula */
+    cb = nb_mqttlib_get_callback_connect(mh, 1000, mkarray());
+    
+    nb_syslog("Dahili broker baglantisi kuruldu. Konulara abone olunuyor...");
+    nb_mqttlib_subscribe(mh, TOPIC_PARAMS_SET, 1, 0, mkarray());
+    nb_mqttlib_subscribe(mh, TOPIC_CONFIG_SET, 1, 0, mkarray());
+    
+    /* Ilk acilista parametre onayini yayinla */
+    publish_params_status(mh);
+    
+    /* Aktif Istemci Dongusu */
+    client_active = true;
+    while (client_active) {
+        /* Gelen mesajlari kuyruktan tamamen tuket (Callback kuyrugu dolmasin) */
+        while (true) {
+            msg_struct = nb_mqttlib_get_callback_message(mh, 50, mkarray());
+            if (is_void(msg_struct) || !is_struct(msg_struct)) {
+                break;
+            }
+            m_data = struct_get(msg_struct, "message");
+            if (is_void(m_data)) {
+                m_data = struct_get(msg_struct, "msg");
+            }
+            /* Timeout aninda NetModule API bos struct doner; mesaj yoksa hemen donguden cik */
+            if (is_void(m_data)) {
+                break;
+            }
+            if (is_struct(m_data)) {
+                topic = struct_get(m_data, "topic");
+                payload = struct_get(m_data, "message");
+                if (is_void(payload)) {
+                    payload = struct_get(m_data, "msg");
+                }
+                
+                if (topic == TOPIC_PARAMS_SET) {
+                    handle_params_update(mh, payload);
+                } else if (topic == TOPIC_CONFIG_SET) {
+                    handle_config_command(mh, payload);
+                }
+            }
+        }
+        
+        /* Telemetri yayin zamani kontrolu */
+        now = time();
+        if (now - last_publish_time >= current_interval_sec) {
+            speed = publish_gnss_telemetry(mh, now);
+            publish_system_telemetry(mh, now);
+            last_publish_time = now;
+            
+            /* Hiz esigine gore hareketli veya rolanti periyodunu sec */
+            if (speed >= speed_threshold_kmh) {
+                current_interval_sec = publish_interval_moving_sec;
+            } else {
+                current_interval_sec = publish_interval_idle_sec;
+            }
+        }
+        
+        sleep(1);
+    }
+    
+    nb_mqttlib_disconnect(mh, 0, mkarray());
+    nb_mqttlib_free(mh);
+    sleep(3);
+}
+
+exit(0);

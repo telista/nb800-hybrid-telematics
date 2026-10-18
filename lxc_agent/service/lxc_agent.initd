@@ -1,0 +1,28 @@
+#!/sbin/openrc-run
+# /etc/init.d/lxc_agent
+# NetModule NB800 Alpine Linux LXC OpenRC Servis Betiği
+
+name="lxc_agent"
+description="NetModule NB800 LXC Telemetry and Integration Agent"
+
+command="/usr/bin/python3"
+command_args="-m lxc_agent.main -c /etc/lxc_agent/config.json"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+directory="/opt/lxc_agent"
+output_log="/var/log/lxc_agent.log"
+error_log="/var/log/lxc_agent.err"
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    checkpath -d -m 0755 /var/lib/lxc_agent
+    checkpath -d -m 0755 /etc/lxc_agent
+    checkpath -d -m 0755 /var/log
+    if [ ! -f /etc/lxc_agent/config.json ] && [ -f /opt/lxc_agent/lxc_agent/service/config.default.json ]; then
+        cp /opt/lxc_agent/lxc_agent/service/config.default.json /etc/lxc_agent/config.json
+    fi
+}

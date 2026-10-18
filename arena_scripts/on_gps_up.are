@@ -1,0 +1,111 @@
+/*
+ * ============================================================================
+ * NetModule NB800 Router - Arena Scripting Language
+ * Dosya Adi: on_gps_up.are
+ * 
+ * ISLEV VE GOREV TANIMI:
+ * Bu betik, NetModule NB800 yonlendiricinin dahili GNSS/GPS modulu uydulara
+ * kilitlendiginde (konum cozumu - 2D/3D fix alindiginda) tetiklenen olay
+ * gudumlu (event-driven) mikro betiktir.
+ * 
+ * Gorevleri:
+ * 1. 127.0.0.1:1883 dahili Mosquitto MQTT brokerina anlik baglanir.
+ * 2. nb_status gnss ve location sorgulari ile gorunen uydu sayisini alir.
+ * 3. local/event/gps konusuna GPS kilitlenmesinin saglandigini bildiren
+ *    {"state": "up", "satellites": <n>, "timestamp": <ts>} JSON paketini
+ *    yayinlar (Retain: 1).
+ * 4. LXC konteyneri icindeki lxc_agent bu sayede konum verisinin guvenilir
+ *    hale geldigini aninda tespit eder ve telemetriyi gecersiz etiketinden cikarir.
+ * 5. MQTT baglantisini kapatir ve sonlanir.
+ * 
+ * TETIKLEYICI (TRIGGER) BILGISI:
+ *   NRSW Olay Kodu  : 301
+ *   NRSW Olay Adi   : gps-up (GNSS fix acquired / satellite tracking active)
+ *   Tetikleme Modu  : Ephemeral Olay Betigi (Event Handler)
+ *   NRSW Job Ayari  : System -> SDK -> Jobs menusunden Trigger Event olarak
+ *                     301 (gps-up) secilerek bu betik baglanir.
+ *   Kritik Not      : Betik sonsuz dongu icermez, calisir ve exit(0) ile biter.
+ * ============================================================================
+ */
+
+/* Broker ve Yayin Sabitleri */
+BROKER_HOST = "127.0.0.1";
+BROKER_PORT = 1883;
+CLIENT_ID   = "nb800_ev_gps_up";
+TOPIC_GPS   = "local/event/gps";
+
+/* Struct alan adlarinda fuzzy arama */
+mixed search_field_contains(mixed s, string sub_name) {
+    if (is_void(s) || !is_struct(s)) return ();
+    fields = struct_fields(s);
+    if (!is_array(fields)) return ();
+    sub_lower = tolower(sub_name);
+    for (i = 0; i < length(fields); i++) {
+        f = fields[i];
+        if (!is_void(strstr(tolower(f), sub_lower))) {
+            return struct_get(s, f);
+        }
+    }
+    return ();
+}
+
+/* Uydu Sayisi ve Zaman Kontrolu */
+now_ts = time();
+satellites = 0;
+
+/* 1. Kaynak: nb_status("gnss") */
+gnss_mod = nb_status("gnss");
+if (!is_void(gnss_mod)) {
+    v_sats = search_field_contains(gnss_mod, "sat");
+    if (!is_void(v_sats)) satellites = cast_to(v_sats, "int");
+}
+
+/* 2. Kaynak: nb_status("location") */
+if (satellites == 0) {
+    loc = nb_status("location");
+    if (!is_void(loc)) {
+        v_sats = search_field_contains(loc, "sat");
+        if (!is_void(v_sats)) satellites = cast_to(v_sats, "int");
+    }
+}
+
+payload = sprintf('{"state": "up", "satellites": %d, "timestamp": %d}', satellites, now_ts);
+
+nb_syslog("Olay Tetiklendi [301 gps-up]: %s", payload);
+
+/* Dahili Brokera Baglanti ve Yayin */
+published = false;
+mh = nb_mqttlib_new(CLIENT_ID, true);
+if (mh >= 0) {
+    conn = nb_mqttlib_connect(mh, BROKER_HOST, BROKER_PORT, 10, mkarray());
+    if (conn == 0) {
+        cb = nb_mqttlib_get_callback_connect(mh, 1000, mkarray());
+        if (!is_void(cb)) {
+            pub_res = nb_mqttlib_publish(mh, TOPIC_GPS, payload, 0, 1, mkarray());
+            if (pub_res == 0) {
+                published = true;
+                nb_syslog("MQTT [301 gps-up] bildirimi yayinlandi -> Topic: %s", TOPIC_GPS);
+            } else {
+                nb_syslog("HATA: MQTT [301 gps-up] yayinlanamadi (Kod: %d)", pub_res);
+            }
+        } else {
+            nb_syslog("HATA: MQTT [301 gps-up] CONNACK zaman asimi");
+        }
+        sleep(1);
+        nb_mqttlib_disconnect(mh, 0, mkarray());
+    } else {
+        nb_syslog("HATA: Dahili brokera baglanilamadi (Kod: %d)", conn);
+    }
+    nb_mqttlib_free(mh);
+} else {
+    nb_syslog("HATA: MQTT handle olusturulamadi (Kod: %d)", mh);
+}
+
+if (!published) {
+    fb_res = nb_mqtt_publish(BROKER_HOST, BROKER_PORT, "", "", TOPIC_GPS, 0, 1, payload);
+    if (fb_res == 0) {
+        nb_syslog("MQTT [301 gps-up] fallback ile yayinlandi (nb_mqtt_publish)");
+    }
+}
+
+exit(0);

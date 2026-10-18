@@ -1,0 +1,80 @@
+/*
+ * ============================================================================
+ * NetModule NB800 Router - Arena Scripting Language
+ * Dosya Adi: on_vpn_up.are
+ * 
+ * ISLEV VE GOREV TANIMI:
+ * Bu betik, NetModule NB800 yonlendiricide OpenVPN tuneli (tun0) basariyla
+ * kuruldugunda ve IP alindiginda tetiklenen olay gudumlu (event-driven)
+ * mikro betiktir.
+ * 
+ * Gorevleri:
+ * 1. 127.0.0.1:1883 dahili Mosquitto MQTT brokerina anlik baglanir.
+ * 2. local/event/vpn konusuna baglantinin aktiflestigini bildiren
+ *    {"state": "up", "interface": "tun0", "timestamp": <ts>} JSON paketini
+ *    yayinlar (Retain: 1).
+ * 3. LXC konteyneri icindeki lxc_agent bu olayi yakalayarak polling beklemeden
+ *    aninda uzak MQTTS/MQTT brokerina (10.8.0.1:1883) baglanir ve cevrimdisi
+ *    kuyrukta (SQLite Store-and-Forward) biriken verileri merkeze bosaltmaya
+ *    (drain) baslar.
+ * 4. MQTT baglantisini guvenli sekilde kapatir ve sonlanir.
+ * 
+ * TETIKLEYICI (TRIGGER) BILGISI:
+ *   NRSW Olay Kodu  : 401
+ *   NRSW Olay Adi   : openvpn-up (OpenVPN connection established)
+ *   Tetikleme Modu  : Ephemeral Olay Betigi (Event Handler)
+ *   NRSW Job Ayari  : System -> SDK -> Jobs menusunden Trigger Event olarak
+ *                     401 (openvpn-up) secilerek bu betik baglanir.
+ *   Kritik Not      : Betik sonsuz dongu icermez, calisir ve exit(0) ile biter.
+ * ============================================================================
+ */
+
+/* Broker ve Yayin Sabitleri */
+BROKER_HOST = "127.0.0.1";
+BROKER_PORT = 1883;
+CLIENT_ID   = "nb800_ev_vpn_up";
+TOPIC_VPN   = "local/event/vpn";
+VPN_IFACE   = "tun0";
+
+/* Olay Zamani */
+now_ts = time();
+payload = sprintf('{"state": "up", "interface": "%s", "timestamp": %d}', VPN_IFACE, now_ts);
+
+nb_syslog("Olay Tetiklendi [401 openvpn-up]: %s", payload);
+
+/* Dahili Brokera Baglanti ve Yayin */
+published = false;
+mh = nb_mqttlib_new(CLIENT_ID, true);
+if (mh >= 0) {
+    conn = nb_mqttlib_connect(mh, BROKER_HOST, BROKER_PORT, 10, mkarray());
+    if (conn == 0) {
+        cb = nb_mqttlib_get_callback_connect(mh, 1000, mkarray());
+        if (!is_void(cb)) {
+            pub_res = nb_mqttlib_publish(mh, TOPIC_VPN, payload, 0, 1, mkarray());
+            if (pub_res == 0) {
+                published = true;
+                nb_syslog("MQTT [401 openvpn-up] bildirimi yayinlandi -> Topic: %s", TOPIC_VPN);
+            } else {
+                nb_syslog("HATA: MQTT [401 openvpn-up] yayinlanamadi (Kod: %d)", pub_res);
+            }
+        } else {
+            nb_syslog("HATA: MQTT [401 openvpn-up] CONNACK zaman asimi");
+        }
+        sleep(1);
+        nb_mqttlib_disconnect(mh, 0, mkarray());
+    } else {
+        nb_syslog("HATA: Dahili brokera baglanilamadi (Kod: %d)", conn);
+    }
+    nb_mqttlib_free(mh);
+} else {
+    nb_syslog("HATA: MQTT handle olusturulamadi (Kod: %d)", mh);
+}
+
+if (!published) {
+    fb_res = nb_mqtt_publish(BROKER_HOST, BROKER_PORT, "", "", TOPIC_VPN, 0, 1, payload);
+    if (fb_res == 0) {
+        nb_syslog("MQTT [401 openvpn-up] fallback ile yayinlandi (nb_mqtt_publish)");
+    }
+}
+
+exit(0);

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Arena",
+  "scopeName": "source.arena",
+  "patterns": [
+    { "name": "comment.line.double-slash.arena", "match": "//.*$" },
+    { "name": "comment.line.number-sign.arena", "match": "#.*$" },
+    { "name": "comment.block.arena", "begin": "/\\*", "end": "\\*/" },
+    {
+      "name": "string.quoted.double.arena",
+      "begin": "\\\"",
+      "end": "\\\"",
+      "patterns": [
+        { "name": "constant.character.escape.arena", "match": "\\\\." }
+      ]
+    },
+    {
+      "name": "constant.language.arena",
+      "match": "\\b(true|false|cnull|FLT_RADIX|FLT_DIG|FLT_MANT_DIG|FLT_MAX_EXP|FLT_MIN_EXP|FLT_EPSILON|FLT_MAX|FLT_MIN|INT_MAX|INT_MIN|RAND_MAX)\\b"
+    },
+    {
+      "name": "keyword.control.arena",
+      "match": "\\b(if|else|while|for|do|return|break|continue|switch|case|default|try|catch|throw|include|template|extends|new|forced)\\b"
+    },
+    {
+      "name": "storage.type.arena",
+      "match": "\\b(void|bool|int|float|string|array|struct|fn|resource|mixed)\\b"
+    },
+    {
+      "name": "support.function.arena",
+      "match": "\\b(nb_[a-zA-Z0-9_]+|printf|sprintf|print|dump|fopen|fclose|fread|fwrite|fseek|ftell|fgetc|fgets|fflush|feof|ferror|clearerr|open|close|read|write|seek|unlink|remove|rename|system|exit|getenv|argc|argv|malloc|calloc|realloc|free|memset|memcpy|memmove|memcmp|memchr|mstring|cstring|mputchar|mgetchar|mputshort|mgetshort|mputint|mgetint|mputfloat|mgetfloat|mputdouble|mgetdouble|mputptr|mgetptr|msize|is_void|is_bool|is_int|is_float|is_string|is_array|is_struct|is_fn|is_resource|is_null|is_file_resource|is_mem_resource|strlen|strcat|strchr|strrchr|strstr|substr|left|right|ord|chr|explode|implode|trim|ltrim|rtrim|tolower|toupper|qsort|mkarray|array_unset|array_compact|array_search|array_merge|array_reverse|socket|bind|connect|listen|accept|send|recv|sendto|recvfrom|select|time|localtime|gmtime|mktime|strftime|pcre_compile|pcre_match|pcre_exec|dyn_open|dyn_close|dyn_call_void|dyn_call_int|dyn_call_float|dyn_call_ptr|sleep|usleep|uptime)\\b"
+    },
+    { "name": "constant.numeric.arena", "match": "\\b[0-9]+(\\.[0-9]+)?\\b" }
+  ]
+}

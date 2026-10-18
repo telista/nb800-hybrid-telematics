@@ -1,0 +1,182 @@
+================================================================================
+NetModule NB800 - arena_agent & lxc_agent Dahili MQTT İletişim Şartnamesi
+================================================================================
+Dosya: arane_agent_mqtt.txt
+Tarih: 2026-10-15
+Tanım: LXC konteynerinde çalışan lxc_agent uygulamasının, Host (NRSW) üzerinde
+       çalışan arena_agent (telemetry_daemon ve mikro betikler) ile dahili Mosquitto
+       broker üzerinden haberleşme konuları, veri tipleri ve JSON formatları.
+================================================================================
+
+1. BAĞLANTI PARAMETRELERİ
+-------------------------
+- Broker Host      : 127.0.0.1 (LXC konteyneri içinden: Host köprü IP'si 192.168.100.1 / 192.168.1.1)
+- Port             : 1883
+- Protokol         : MQTT v3.1.1
+- Kodlama          : UTF-8 JSON metni
+- Yetkilendirme    : Anonim / Dahili yerel ağ
+
+
+================================================================================
+2. lxc_agent'ın ABONE OLACAĞI (DİNLEYECEĞİ) KONULAR (HOST -> LXC)
+================================================================================
+
+A. PERİYODİK TELEMETRİ KONULARI
+-------------------------------
+
+1. Konu: local/telemetry/gnss
+   - Üretici      : telemetry_daemon.are
+   - Periyot      : Seyir halinde 2 sn, rölantide 30 sn (dinamik ayarlanabilir)
+   - QoS          : 0
+   - Açıklama     : Anlık GPS/GNSS koordinatları, yer hızı, irtifa ve uydu durumu.
+   - JSON Formatı :
+     {
+       "timestamp": 1792062502,
+       "fix": true,
+       "latitude": 41.005478,
+       "longitude": 29.046918,
+       "speed_kmh": 0.0,
+       "altitude_m": 130.6,
+       "satellites": 9
+     }
+   - Alan Açıklamaları:
+     * timestamp   : Unix zaman damgası (saniye).
+     * fix         : boolean (true = 2D/3D konum çözümü geçerli, false = fix yok).
+     * latitude    : Enlem (ondalık derece, WGS84).
+     * longitude   : Boylam (ondalık derece, WGS84).
+     * speed_kmh   : Yer hızı (km/saat cinsinden float).
+     * altitude_m  : Deniz seviyesinden irtifa (metre).
+     * satellites  : Takip edilen aktif uydu sayısı (int).
+
+2. Konu: local/telemetry/system
+   - Üretici      : telemetry_daemon.are
+   - Periyot      : Seyir halinde 2 sn, rölantide 30 sn
+   - QoS          : 0
+   - Açıklama     : Router donanım sağlığı, hücresel RSSI sinyali, çalışma süresi.
+   - JSON Formatı :
+     {
+       "timestamp": 1792062532,
+       "cpu_temperature": 0.0,
+       "uptime_sec": 780,
+       "memory_usage_pct": 32.5,
+       "wwan_signal_rssi": -61,
+       "voltage_mv": 12000
+     }
+   - Alan Açıklamaları:
+     * timestamp        : Unix zaman damgası (saniye).
+     * cpu_temperature  : İşlemci sıcaklığı (°C). (NB800 V3.2 SoC için donanım 0.0 döner).
+     * uptime_sec       : Cihazın açılıştan itibaren açık kaldığı toplam süre (saniye).
+     * memory_usage_pct : NRSW işletim sistemi bellek kullanım yüzdesi (%).
+     * wwan_signal_rssi : Hücresel modem sinyal seviyesi (-dBm).
+     * voltage_mv       : Giriş besleme gerilimi (milivolt, örn. 12000 = 12V).
+
+
+B. OLAY GÜDÜMLÜ (EVENT) KONULAR (DURUM TETİKLEYİCİLERİ)
+-------------------------------------------------------
+Bu konular sürekli veri basmaz; sadece donanım/şebeke olaylarında anında tetiklenir (QoS: 0/1, Retain: 1).
+
+1. Konu: local/event/wan
+   - Üretici      : on_wan_up.are (Trigger 101), on_wan_down.are (Trigger 102) veya telemetry_daemon.are (Proaktif RSSI)
+   - Açıklama     : Hücresel/WAN bağlantısının kurulduğunu veya koptuğunu bildirir.
+   - lxc_agent Rolü: KRİTİK! "down" mesajı geldiğinde lxc_agent uzak MQTTS aktarımını
+                     durdurur ve anında Store-and-Forward (SQLite / dosya) depolamaya geçer.
+                     "up" geldiğinde ise birikmiş tamponu boşaltmaya (drain) başlar.
+   - JSON Örnekleri:
+     {"state": "up", "interface": "Mobile1", "timestamp": 1792062400}
+     {"state": "down", "interface": "Mobile1", "timestamp": 1792062415}
+     {"state": "down", "reason": "signal_lost", "interface": "Mobile1", "rssi": -115, "timestamp": 1792062416}
+
+2. Konu: local/event/gps
+   - Üretici      : on_gps_up.are (Trigger 301), on_gps_down.are (Trigger 302)
+   - Açıklama     : GPS uydularına kilitlenildiğini (fix alındı) veya sinyalin kaybolduğunu (tünel vb.) bildirir.
+   - lxc_agent Rolü: Konum verisinin güvenilirlik bayrağını belirler.
+   - JSON Örnekleri:
+     {"state": "up", "satellites": 8, "timestamp": 1792062400}
+     {"state": "down", "timestamp": 1792062450}
+
+3. Konu: local/event/time
+   - Üretici      : on_time_sync.are (Trigger 508: system-time-updated)
+   - Açıklama     : Router sistem saatinin NTP veya uydudan güncellendiğini bildirir.
+   - lxc_agent Rolü: RTC pili bulunmayan NB800'ün ilk açılışta 1970 tarihiyle ürettiği
+                     kayıtları geriye dönük gerçek zamanla günceller (timestamp back-patching).
+   - JSON Örneği  :
+     {"state": "sync", "timestamp": 1792062480}
+
+4. Konu: local/event/system
+   - Üretici      : on_startup.are (Trigger 505: system-startup)
+   - Açıklama     : Cihaz ilk açılışını tamamladığında bir kez yayınlanır.
+   - JSON Örneği  :
+     {"event": "startup", "timestamp": 1792062350}
+
+
+C. DURUM VE KOMUT YANIT KONULARI (HOST -> LXC)
+----------------------------------------------
+
+1. Konu: local/arena/params/status
+   - Üretici      : telemetry_daemon.are
+   - Açıklama     : Çalışma parametrelerinin güncellendiğini teyit eden bildirim (ACK).
+   - JSON Örneği  :
+     {
+       "publish_interval_moving_sec": 2,
+       "publish_interval_idle_sec": 30,
+       "speed_threshold_kmh": 5.0,
+       "max_storage_mb": 50,
+       "status": "active"
+     }
+
+2. Konu: local/cmd/config/res
+   - Üretici      : telemetry_daemon.are
+   - Açıklama     : Router konfigürasyon değişikliği (nb_config_set) uygulama sonucu.
+   - JSON Örneği  :
+     {
+       "req_id": "cfg-2026-001",
+       "status": "success",
+       "code": 0,
+       "message": "Configuration applied and committed"
+     }
+
+
+================================================================================
+3. lxc_agent'ın YAYINLAYACAĞI (HOST'A EMİR GÖNDERECEĞİ) KONULAR (LXC -> HOST)
+================================================================================
+
+A. ÇALIŞMA PARAMETRELERİNİ DEĞİŞTİRME (HOT-RELOAD)
+--------------------------------------------------
+- Konu        : local/arena/params/set
+- Yayın Modu  : QoS 1, Retain true (Reboot sonrası kalıcılık için)
+- Açıklama    : telemetry_daemon'ın okuma ve yayınlama frekansını dinamik değiştirir.
+- JSON Formatı:
+  {
+    "publish_interval_moving_sec": 1,
+    "publish_interval_idle_sec": 60,
+    "speed_threshold_kmh": 10.0,
+    "max_storage_mb": 50
+  }
+- Etki        : Betik yeniden başlatılmadan döngü anında yeni frekansta çalışır.
+
+B. ROUTER AYARLARINI UZAKTAN DEĞİŞTİRME
+---------------------------------------
+- Konu        : local/cmd/config/set
+- Yayın Modu  : QoS 1
+- Açıklama    : Router NRSW konfigürasyonunu (CLI eşdeğeri) uzaktan değiştirmek için kullanılır.
+- JSON Formatı:
+  {
+    "req_id": "cfg-2026-001",
+    "key": "system.hostname",
+    "value": "NB800-FILO-042"
+  }
+- Etki        : telemetry_daemon nb_config_set() ve nb_config_done() çağrılarını
+                işletir ve sonucu local/cmd/config/res konusuna yazar.
+
+
+================================================================================
+4. lxc_agent İÇİN PRATİK ABONELİK (SUBSCRIBE) ŞABLONU
+================================================================================
+lxc_agent (Python / paho-mqtt, Go, Node.js veya C) tek bir bağlantıda şu konulara
+abone olarak tüm akışı yakalayabilir:
+
+  client.subscribe("local/telemetry/#")
+  client.subscribe("local/event/#")
+  client.subscribe("local/arena/params/status")
+  client.subscribe("local/cmd/config/res")
+================================================================================

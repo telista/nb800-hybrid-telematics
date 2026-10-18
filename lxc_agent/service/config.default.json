@@ -1,0 +1,46 @@
+{
+  "log_level": "INFO",
+  "web": {
+    "enabled": true,
+    "port": 8080,
+    "auth_enabled": true,
+    "username": "admin",
+    "password": "CHANGE_ME_PASSWORD"
+  },
+  "device": {
+    "fleet_id": "demo-fleet-01",
+    "vehicle_id": "NB800-DEMO-001",
+    "imei": "352255000000000"
+  },
+  "local_mqtt": {
+    "host": "auto",
+    "port": 1883,
+    "client_id": "lxc_telemetry_agent",
+    "keepalive": 60
+  },
+  "remote_mqtt": {
+    "enabled": false,
+    "host": "10.8.0.1",
+    "port": 1883,
+    "client_id": "NB800-DEMO-001-uplink",
+    "keepalive": 60,
+    "username": "",
+    "password": "",
+    "use_tls": false,
+    "ca_cert": null,
+    "client_cert": null,
+    "client_key": null
+  },
+  "storage": {
+    "db_path": "/var/lib/lxc_agent/store_and_forward.db",
+    "max_storage_mb": 50,
+    "batch_size": 50,
+    "flush_interval_sec": 3.0,
+    "drain_interval_sec": 1.0
+  },
+  "optimization": {
+    "enabled": false,
+    "health_interval_sec": 60,
+    "publish_health": false
+  }
+}

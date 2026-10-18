@@ -1,0 +1,37 @@
+{
+  "name": "arena-language-support",
+  "displayName": "Arena Scripting Language",
+  "publisher": "local",
+  "description": "NetModule Router Arena SDK Support",
+  "version": "1.0.0",
+  "main": "./extension.js",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "activationEvents": [ "onLanguage:arena" ],
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "arena",
+        "aliases": [
+          "Arena",
+          "arena"
+        ],
+        "extensions": [
+          ".are"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "arena",
+        "scopeName": "source.arena",
+        "path": "./syntaxes/arena.tmLanguage.json"
+      }
+    ]
+  }
+}

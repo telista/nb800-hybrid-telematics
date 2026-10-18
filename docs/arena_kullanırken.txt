@@ -1,0 +1,93 @@
+================================================================================
+ARENA BETİK DİLİ VE NETMODULE ROUTER KULLANIM REHBERİ (ÖNEMLİ NOTLAR)
+================================================================================
+
+Bu dosya, NetModule router'larda (NB800 vb.) Arena betik dili ile geliştirme
+yaparken karşılaşılabilecek kritik derleme ve çalışma zamanı (runtime) hatalarını
+önlemek için hazırlanmıştır.
+
+--------------------------------------------------------------------------------
+1. 'void' DEĞER KONTROLÜ (EN KRİTİK SÖZDİZİMİ KURALI)
+--------------------------------------------------------------------------------
+- HATA: 
+    x != void   veya   x == void
+    Derleyici Hatası: "parse error, unexpected TYPE_VOID" (rc 1)
+- NEDENİ:
+    Arena dilinde 'void' bir değişken değeri (literal) DEĞİL, bir tip anahtar
+    kelimesidir. Bu yüzden doğrudan karşılaştırma operatörleriyle (==, !=) kullanılamaz.
+- DOĞRU KULLANIM:
+    Yerleşik tip kontrol fonksiyonlarını kullanın:
+    !is_void(x)   -> x void değilse (değer varsa)
+     is_void(x)   -> x void ise (değer dönmediyse)
+
+    Örnek:
+    if (!is_void(strstr(sender, "5333737890"))) { ... }
+
+    (Aynı kural diğer tipler için de geçerlidir: is_null(), is_int(), is_string(), is_array())
+
+--------------------------------------------------------------------------------
+2. YORUM SATIRLARINDA KESME İŞARETİ (') KULLANILMAMALIDIR
+--------------------------------------------------------------------------------
+- HATA:
+    /* Yanıt SMS'ini gönder */  veya  /* 'void' tipi kontrolü */
+    Derleyici Hatası: "parse error, unexpected $" (EOF parse error)
+- NEDENİ:
+    Arena'nın sözcük ayrıştırıcısı (lexer), blok yorumlar (/* ... */) içindeki
+    tek tırnak ve kesme işaretlerini (') bazen karakter/metin sabiti açılışı
+    gibi algılayabilir ve dosya sonuna kadar kapanmayan sembol arayarak çöker.
+- KURAL:
+    Yorum satırlarında asla kesme işareti (') veya tek tırnak kullanmayın:
+    Doğru: /* Yanit SMS gonder */
+    Doğru: // Numara kontrolu
+
+--------------------------------------------------------------------------------
+3. DİZİ (ARRAY) TANIMLAMA: KÖŞELİ PARANTEZ LİTERAL DEĞİLDİR
+--------------------------------------------------------------------------------
+- HATA:
+    arr = [1, 2, 3];
+    Derleyici Hatası: "parse error, unexpected '['"
+- NEDENİ:
+    Arena'da '[' ve ']' köşeli parantezleri yalnızca dizi elemanına erişim
+    (indeksleme, örn. arr[0]) için kullanılır; dizi oluşturmak için kullanılamaz.
+- DOĞRU KULLANIM:
+    Dizi oluşturmak için her zaman 'mkarray()' fonksiyonu kullanılır:
+    arr = mkarray(1, 2, 3);
+    arr = mkarray("a", "b", "c");
+
+--------------------------------------------------------------------------------
+4. İŞ YÖNETİMİ: OLAY TETİKLEYİCİ (EVENT TRIGGER) VS SÜREKLİ DAEMON
+--------------------------------------------------------------------------------
+NetModule NRSW üzerinde SDK betikleri iki farklı mimari ile çalıştırılabilir:
+
+A) Olay Tetiklemeli (Event Trigger) Modu (Örn: 'sms-received'):
+   - Router'a SMS geldiğinde Olay Yöneticisi betiği otomatik başlatır.
+   - Bu modda betik içine ASLA sonsuz 'while (true)' döngüsü KONULMAMALIDIR!
+   - Betik gelen kutusunu taramalı, mesajları işlemeli ve 'exit(0)' ile bitmelidir.
+   - Aksi halde her yeni SMS geldiğinde arka planda yeni bir sonsuz döngü başlatılır,
+     sistem kaynakları tükenir veya işler kilitlenir.
+
+B) Sürekli Daemon (Polling) Modu:
+   - Betik router açılışında bir kez başlatılır ve arka planda sürekli çalışır.
+   - Bu modda 'while (true) { ... sleep(3); }' yapısı kullanılır.
+
+--------------------------------------------------------------------------------
+5. SMS MÜKERRERLİĞİNİ ÖNLEME (nb_sms_delete)
+--------------------------------------------------------------------------------
+- Router'ın gelen kutusundaki SMS'ler ('nb_sms_list()') hafızada kalıcıdır.
+- Eşleşen ve yanıt verilen bir SMS 'nb_sms_delete(msg_id)' ile silinmezse,
+  betik her çalıştığında aynı mesajı tekrar okur ve sonsuz döngüde mükerrer
+  SMS göndererek hattın bakiyesini tüketir.
+- KURAL: İşlenen veya yanıtlanan mesajı mutlaka silin.
+
+--------------------------------------------------------------------------------
+6. YÜKLEMEDEN ÖNCE YEREL SÖZDİZİMİ KONTROLÜ (arena -c)
+--------------------------------------------------------------------------------
+Router'a betik yüklemeden önce bilgisayarınızdaki yerel Arena derleyicisini
+kullanarak sözdizimi hatalarını saniyeler içinde yakalayabilirsiniz:
+
+    arena -c betik_adi.are
+
+- Eğer kod hatasız ise hiçbir çıktı vermez ve 0 koduyla döner.
+- Eğer sözdizimi hatası varsa satır ve sütun numarasıyla birlikte hatayı gösterir.
+- Bu işlem, router üzerindeki "job failed with rc 1" çökmelerini tamamen önler.
+================================================================================
