@@ -105,7 +105,7 @@ Alpine Linux konteyneri içinde çalışan servis bileşenleri:
 2. `vscode_extension` klasörünü VS Code'a yükleyerek Arena betiklerini inceleyin veya düzenleyin.
 3. **Ağ Ön Hazırlığı:** NB800 fabrika çıkışı `192.168.1.1` IP'si ile gelir. Konteyner mimarimizin çalışabilmesi için router LAN IP'sini `192.168.10.1` olarak güncelleyin (Detaylar: [`deploy/README.md`](deploy/README.md)).
 4. Kendi merkezi VPN / MQTT broker adreslerinizi `lxc_agent/service/config.default.json` içine tanımlayın.
-5. `deploy/` altındaki araçlarla Alpine rootfs paketini oluşturup NB800 cihazınıza yükleyin.
+5. `deploy/` altındaki araçlarla Alpine rootfs paketini oluşturup NB800 cihazınıza yükleyin (Sıfırdan armhf rootfs indirme, paket kurma ve dağıtım rehberi için: [`deploy/README.md`](deploy/README.md)).
 
 ---
 

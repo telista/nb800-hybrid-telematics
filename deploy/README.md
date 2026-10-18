@@ -34,7 +34,73 @@ Konteyner ve router arasındaki IP haritası şu şekildedir:
 
 ---
 
-## Betikler ve Görevleri
+## 🛠️ Sıfırdan Alpine ARMHF Rootfs Hazırlama (Geliştirici Makinesinde)
+
+NetModule NB800 donanımı **TI AM335x (ARMv7 Cortex-A8, 32-bit)** tabanlı bir işlemciye sahiptir. Bu nedenle LXC konteyneri olarak Alpine Linux'un **`armhf`** mimarisine ait **Mini Root Filesystem** paketi kullanılmalıdır.
+
+Geliştirme makinenizde dağıtım betiklerimizin sorunsuz çalışması için dizin düzeni şu şekilde olmalıdır:
+
+```text
+$HOME/nb800-alpine/
+├── alpine-minirootfs-3.19.1-armhf.tar.gz   # İndirilen Alpine resmi taban arşivi
+├── rootfs/                                 # Açılmış dosya sistemi ve kurulu paketler
+└── rootfs_alpine_armhf.tar.xz             # pack_and_serve.sh çıktısı (Router'a yüklenecek paket)
+```
+
+Sıfırdan bir geliştirme ortamı kurmak için aşağıdaki 4 adımı sırasıyla uygulayın:
+
+### Adım 1: Dizinleri Oluşturun ve Alpine Minirootfs'i İndirin
+```bash
+mkdir -p ~/nb800-alpine/rootfs
+cd ~/nb800-alpine
+
+# Alpine Linux 3.19 armhf minirootfs paketini indirin:
+wget https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/armhf/alpine-minirootfs-3.19.1-armhf.tar.gz
+```
+
+### Adım 2: Dosya Sistemini Çıkartın
+Dosya izinlerini ve özel aygıt düğümlerini korumak için arşiv **`sudo`** ve `-p` parametresiyle çıkartılmalıdır:
+```bash
+cd ~/nb800-alpine/rootfs
+sudo tar -xpf ../alpine-minirootfs-3.19.1-armhf.tar.gz
+```
+
+### Adım 3: x86_64 PC Üzerinde QEMU ile Bağımlılıkları Yükleyin (chroot)
+Geliştirme bilgisayarınız Intel/AMD (x86_64) mimarisinde olduğundan, ARM ikili dosyalarını çalıştırabilmek için `qemu-user-static` emülatörü kullanılır:
+
+```bash
+# 1. Geliştirici makinesine QEMU ARM emülatörünü kurun (Debian/Ubuntu için):
+sudo apt update && sudo apt install -y qemu-user-static
+
+# 2. QEMU ikilisini ve DNS çözümleyicisini rootfs içine kopyalayın:
+sudo cp /usr/bin/qemu-arm-static ~/nb800-alpine/rootfs/usr/bin/
+sudo cp /etc/resolv.conf ~/nb800-alpine/rootfs/etc/
+
+# 3. Rootfs içine chroot ile giriş yapın:
+sudo chroot ~/nb800-alpine/rootfs /bin/sh
+
+# 4. (Artık ARM mimarisindeki Alpine kabuğundasınız) Temel paketleri yükleyin:
+apk update
+apk add python3 py3-paho-mqtt supervisor sqlite tzdata
+
+# 5. Konteyner ortamından çıkın:
+exit
+```
+*(Not: `deploy/pack_and_serve.sh` ve `deploy/fix_and_pack.sh` betikleri paketleme sırasında `/usr/bin/qemu-arm-static` dosyasını otomatik olarak temizler).*
+
+### Adım 4: Kodları Aktarın ve İmajı Paketleyin
+Geliştirme dizinine dönün (`Arena` proje kökü) ve betikleri çalıştırın:
+```bash
+# Python telemetri ajanını rootfs'e aktarın:
+sudo ./deploy/py_to_alpine.sh
+
+# Paketi oluşturup router için HTTP indirme sunucusunu başlatın:
+sudo ./deploy/pack_and_serve.sh
+```
+
+---
+
+## Dağıtım Betikleri ve Görevleri
 
 ### 1. `py_to_alpine.sh`
 * **Görevi:** Geliştirme makinenizdeki güncel `lxc_agent` Python kaynak kodlarını, yapılandırma dosyalarını ve servis scriptlerini yerel Alpine rootfs dizininize (`$HOME/nb800-alpine/rootfs`) kopyalar. Gerekli dosya izinlerini ayarlar.
