@@ -12,14 +12,11 @@
  *    surekli canli tutar.
  * 2. local/arena/params/set konusunu dinleyerek calisma frekansi ve hiz esigi
  *    parametrelerini calisma aninda (hot-reload) dinamik olarak gunceller.
- * 3. local/cmd/config/set konusunu dinleyerek merkezden gelen router ayarlarini
- *    nb_config_set ve nb_config_done fonksiyonlariyla uygular, sonucu
- *    local/cmd/config/res konusuna iletir.
- * 4. Belirlenen periyotlarda (hareket halinde default 2 sn, rolantide default 30 sn)
+ * 3. Belirlenen periyotlarda (hareket halinde default 2 sn, rolantide default 30 sn)
  *    nb_status location ve system verilerini okur.
- * 5. Elde edilen verileri JSON formatina donusturerek local/telemetry/gnss ve
+ * 4. Elde edilen verileri JSON formatina donusturerek local/telemetry/gnss ve
  *    local/telemetry/system konularina yayinlar.
- * 6. Proaktif Hucresel Sinyal Takibi: Hucresel sinyal seviyesini (RSSI) her
+ * 5. Proaktif Hucresel Sinyal Takibi: Hucresel sinyal seviyesini (RSSI) her
  *    dongude denetler; sinyal koptugunda (-110 dBm alti veya 0/99) NRSW kernel
  *    zaman asimini beklemeden aninda local/event/wan konusuna down bildirir.
  * 
@@ -47,8 +44,6 @@ TOPIC_EVENT_WAN        = "local/event/wan";
 TOPIC_EVENT_VPN        = "local/event/vpn";
 TOPIC_PARAMS_SET       = "local/arena/params/set";
 TOPIC_PARAMS_STATUS    = "local/arena/params/status";
-TOPIC_CONFIG_SET       = "local/cmd/config/set";
-TOPIC_CONFIG_RES       = "local/cmd/config/res";
 
 /* Calisma Parametreleri ve Varsayilan Degerler */
 publish_interval_moving_sec = 2;
@@ -136,33 +131,6 @@ void handle_params_update(int mh, string payload) {
         publish_interval_moving_sec, publish_interval_idle_sec, speed_threshold_kmh);
         
     publish_params_status(mh);
-}
-
-/* Uzaktan Router Konfigurasyon Islemi */
-void handle_config_command(int mh, string payload) {
-    req_id = json_get_value(payload, "req_id");
-    key    = json_get_value(payload, "key");
-    val    = json_get_value(payload, "value");
-    
-    if (strlen(key) == 0) {
-        res_payload = sprintf('{"req_id": "%s", "status": "error", "code": 1, "message": "Eksik key alani"}', req_id);
-        nb_mqttlib_publish(mh, TOPIC_CONFIG_RES, res_payload, 1, 0, mkarray());
-        return;
-    }
-    
-    cfg_cmd = strcat(key, "=", val);
-    nb_syslog("Konfigurasyon komutu uygulaniyor: %s (Req: %s)", cfg_cmd, req_id);
-    
-    ret = nb_config_set(cfg_cmd);
-    if (ret == 0) {
-        nb_config_done();
-        res_payload = sprintf('{"req_id": "%s", "status": "success", "code": 0, "message": "Configuration applied and committed"}', req_id);
-    } else {
-        res_payload = sprintf('{"req_id": "%s", "status": "error", "code": %d, "message": "nb_config_set basarisiz"}', req_id, ret);
-    }
-    
-    nb_mqttlib_publish(mh, TOPIC_CONFIG_RES, res_payload, 1, 0, mkarray());
-    nb_syslog("Konfigurasyon yaniti iletildi: %s", res_payload);
 }
 
 /* Struct icinden guvenli alan okuma */
@@ -497,7 +465,6 @@ while (true) {
     
     nb_syslog("Dahili broker baglantisi kuruldu. Konulara abone olunuyor...");
     nb_mqttlib_subscribe(mh, TOPIC_PARAMS_SET, 1, 0, mkarray());
-    nb_mqttlib_subscribe(mh, TOPIC_CONFIG_SET, 1, 0, mkarray());
     
     publish_params_status(mh);
     
@@ -526,8 +493,6 @@ while (true) {
                 
                 if (topic == TOPIC_PARAMS_SET) {
                     handle_params_update(mh, payload);
-                } else if (topic == TOPIC_CONFIG_SET) {
-                    handle_config_command(mh, payload);
                 }
             }
         }

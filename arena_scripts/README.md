@@ -26,6 +26,5 @@ NRSW Web Arayüzünde **System -> SDK -> Scripts** menüsünden yüklenir ve **S
 
 ## Dinlenen Yönetim ve Komut Konuları
 
-`telemetry_daemon.are`, LXC katmanından gelen downlink emirlerini de dinler:
-* `local/arena/params/set`: Seyir/rölanti okuma frekanslarını ve hız eşiğini yeniden başlatmadan çalışma anında (Hot-Reload) günceller.
-* `local/cmd/config/set`: Router NRSW sistem ayarlarını (`nb_config_set`) uzaktan günceller ve sonucunu `local/cmd/config/res` konusuna iletir.
+`telemetry_daemon.are`, LXC katmanından gelen downlink emirlerini dinler:
+* `local/arena/params/set`: Seyir/rölanti okuma frekanslarını ve hız eşiğini yeniden başlatmadan çalışma anında (Hot-Reload) dinamik olarak günceller.
