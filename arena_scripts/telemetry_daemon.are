@@ -27,8 +27,8 @@
  * Bu betik olay gudumlu degil, surekli calisan bir arka plan servisidir
  * (Continuous Daemon).
  * NRSW Web Arayuzu veya CLI uzerinden:
- *   System -> SDK -> Scripts altinda yuklenir.
- *   System -> SDK -> Jobs altinda Startup Job olarak tanimlanir
+ *   Services -> SDK -> Administration (Scripts) altinda yuklenir.
+ *   Services -> SDK -> Jobs altinda Startup Job olarak tanimlanir
  *   veya SDK Autostart mekanizmasi ile sistem acilisinda bir kez baslatilir.
  * ============================================================================
  */
@@ -192,7 +192,7 @@ mixed search_field_contains(mixed s, string sub_name) {
     return ();
 }
 
-/* Struct alan adlarini virgülle ayrilmis metne cevirme (Loglama icin) */
+/* Struct alan adlarini virgülle ayrilmis metne cevirme */
 string dump_struct_keys(mixed s) {
     if (is_void(s) || !is_struct(s)) return "void";
     fields = struct_fields(s);
@@ -229,7 +229,7 @@ float publish_gnss_telemetry(int mh, int now_ts) {
     satellites = 0;
     is_fixed = 0;
     
-    /* 1. Kaynak: nb_status("gnss") (Donanim seviyesi GPS/GNSS durumu) */
+    /* 1. Kaynak: nb_status("gnss") */
     gnss_mod = nb_status("gnss");
     if (!is_void(gnss_mod) && is_struct(gnss_mod)) {
         v_lat = search_field_contains(gnss_mod, "lat");
@@ -254,7 +254,7 @@ float publish_gnss_telemetry(int mh, int now_ts) {
         }
     }
     
-    /* 2. Kaynak: nb_status("location") (Ters cografi adres ve konum servisi) */
+    /* 2. Kaynak: nb_status("location") */
     loc = nb_status("location");
     if (!is_void(loc) && is_struct(loc)) {
         if (latitude == 0.0) {
@@ -299,9 +299,6 @@ float publish_gnss_telemetry(int mh, int now_ts) {
 
 /* Proaktif Sinyal Seviyesi ve Baglanti Kontrolu */
 void check_wan_signal_state(int mh, int rssi, int now_ts) {
-    /* Sinyal seviyesi kritik esik kontrolu:
-     * RSSI <= -110 dBm, 0 veya 99 (bilinmeyen/kayip) durumunda sinyal kesilmis sayilir.
-     */
     is_lost = (rssi <= RSSI_THRESHOLD_CRITICAL || rssi == 0 || rssi == 99 || rssi == -120);
     
     if (is_lost) {
@@ -337,11 +334,9 @@ void publish_system_telemetry(int mh, int now_ts) {
     
     sys = nb_status("system");
     if (!is_void(sys) && is_struct(sys)) {
-        /* Donanim Gozetmeni (HYDRA) Durumu */
         v_hydra = struct_get(sys, "HYDRA");
         if (!is_void(v_hydra)) hydra_str = cast_to(v_hydra, "string");
 
-        /* Sicaklik: Sistemden ne okunuyorsa ham degeri aktar (Uretici firmware duzeltmesi gelene kadar) */
         v_temp = struct_get(sys, "TEMPERATURE");
         if (!is_void(v_temp)) {
             cpu_temp = cast_to(v_temp, "float");
@@ -349,11 +344,9 @@ void publish_system_telemetry(int mh, int now_ts) {
             cpu_temp = 0.0;
         }
         
-        /* Uptime: NRSW dakika cinsinden verir (orn: 10 dk), saniyeye ceviriyoruz */
         v_up = struct_get(sys, "UPTIME");
         if (!is_void(v_up)) uptime_sec = cast_to(v_up, "int") * 60;
         
-        /* Dinamik RAM Kullanimi Hesaplama (MEM_TOTAL & MEM_FREE) */
         v_mem_tot = struct_get(sys, "MEM_TOTAL");
         v_mem_free = struct_get(sys, "MEM_FREE");
         if (!is_void(v_mem_tot) && !is_void(v_mem_free)) {
@@ -392,12 +385,11 @@ void publish_system_telemetry(int mh, int now_ts) {
         }
     }
     
-    /* OpenVPN Tünel Durumu Sorgulama */
+    /* OpenVPN Tünel Durumu */
     vpn_connected = 0;
     vpn_ip_str = "";
     vpn_st = nb_status("openvpn");
     if (!is_void(vpn_st) && is_struct(vpn_st)) {
-        /* Oncelikle OPENVPN1_STATUS veya OPENVPN0_STATUS kontrol et */
         v_vpn_st = struct_get(vpn_st, "OPENVPN1_STATUS");
         if (is_void(v_vpn_st)) v_vpn_st = struct_get(vpn_st, "OPENVPN0_STATUS");
         if (is_void(v_vpn_st)) v_vpn_st = struct_get(vpn_st, "OPENVPN_STATUS");
@@ -409,7 +401,6 @@ void publish_system_telemetry(int mh, int now_ts) {
             }
         }
         
-        /* Eger bulunamadiysa tum alanlari tara (cipher haric) */
         if (vpn_connected == 0) {
             fields = struct_fields(vpn_st);
             if (is_array(fields)) {
@@ -427,7 +418,6 @@ void publish_system_telemetry(int mh, int now_ts) {
             }
         }
 
-        /* IP tespiti: OPENVPN1_LOCAL_IP, OPENVPN1_IP, OPENVPN1_ADDRESS vb. */
         v_vpn_ip = struct_get(vpn_st, "OPENVPN1_LOCAL_IP");
         if (is_void(v_vpn_ip)) v_vpn_ip = struct_get(vpn_st, "OPENVPN0_LOCAL_IP");
         if (is_void(v_vpn_ip)) v_vpn_ip = struct_get(vpn_st, "OPENVPN1_IP");
@@ -435,7 +425,6 @@ void publish_system_telemetry(int mh, int now_ts) {
         if (!is_void(v_vpn_ip)) {
             vpn_ip_str = cast_to(v_vpn_ip, "string");
         } else {
-            /* Alanlar icinde local_ip veya _ip arayalim ama cipher icermeyen */
             fields = struct_fields(vpn_st);
             if (is_array(fields)) {
                 for (i = 0; i < length(fields); i++) {
@@ -453,7 +442,6 @@ void publish_system_telemetry(int mh, int now_ts) {
         }
     }
     
-    /* Tunel bagli fakat IP algilanamadiysa tun0 varsayilan IP degerini ata */
     if (vpn_connected == 1 && strlen(vpn_ip_str) == 0) {
         vpn_ip_str = "10.8.0.2";
     }
@@ -489,11 +477,6 @@ void publish_system_telemetry(int mh, int now_ts) {
 /* Ana Daemon Calisma Dongusu */
 nb_syslog("NB800 Telemetry Daemon baslatiliyor...");
 
-/* Sistem, WWAN ve OpenVPN durum ayrintilarini syslog ile tespit et */
-nb_syslog("STATUS system dump: %s", dump_struct_debug(nb_status("system")));
-nb_syslog("STATUS wwan alanlari: %s", dump_struct_keys(nb_status("wwan")));
-nb_syslog("STATUS openvpn dump: %s", dump_struct_debug(nb_status("openvpn")));
-
 while (true) {
     mh = nb_mqttlib_new(CLIENT_ID, clean_session);
     if (mh < 0) {
@@ -510,20 +493,17 @@ while (true) {
         continue;
     }
     
-    /* Baglanti onayini (CONNACK) dogrula */
     cb = nb_mqttlib_get_callback_connect(mh, 1000, mkarray());
     
     nb_syslog("Dahili broker baglantisi kuruldu. Konulara abone olunuyor...");
     nb_mqttlib_subscribe(mh, TOPIC_PARAMS_SET, 1, 0, mkarray());
     nb_mqttlib_subscribe(mh, TOPIC_CONFIG_SET, 1, 0, mkarray());
     
-    /* Ilk acilista parametre onayini yayinla */
     publish_params_status(mh);
     
-    /* Aktif Istemci Dongusu */
     client_active = true;
     while (client_active) {
-        /* Gelen mesajlari kuyruktan tamamen tuket (Callback kuyrugu dolmasin) */
+        /* Gelen mesajlari kuyruktan tamamen tuket */
         while (true) {
             msg_struct = nb_mqttlib_get_callback_message(mh, 50, mkarray());
             if (is_void(msg_struct) || !is_struct(msg_struct)) {
@@ -533,7 +513,7 @@ while (true) {
             if (is_void(m_data)) {
                 m_data = struct_get(msg_struct, "msg");
             }
-            /* Timeout aninda NetModule API bos struct doner; mesaj yoksa hemen donguden cik */
+            /* Timeout durumunda API bos struct doner; mesaj yoksa hemen kir ve yayina gec */
             if (is_void(m_data)) {
                 break;
             }
@@ -559,7 +539,6 @@ while (true) {
             publish_system_telemetry(mh, now);
             last_publish_time = now;
             
-            /* Hiz esigine gore hareketli veya rolanti periyodunu sec */
             if (speed >= speed_threshold_kmh) {
                 current_interval_sec = publish_interval_moving_sec;
             } else {
