@@ -21,10 +21,3 @@ NRSW Web Arayüzünde **System -> SDK -> Scripts** menüsünden yüklenir ve **S
 | `on_vpn_down.are` | **Event Trigger 402** (`openvpn-down`) | `local/event/vpn` | OpenVPN tüneli koptuğunda çalışır (`state: down`). LXC telemetri ajanının uzak aktarımı dondurarak sıfır gecikmeyle SQLite Store-and-Forward'a geçmesini sağlar. |
 | `on_gps_up.are` | **Event Trigger 301** (`gps-up`) | `local/event/gps` | GPS uydularına kilitlenildiğinde (`fix: true`) çalışır. |
 | `on_gps_down.are` | **Event Trigger 302** (`gps-down`) | `local/event/gps` | Uydu kilitlenmesi kaybolduğunda (`fix: false`) çalışır. |
-
----
-
-## Dinlenen Yönetim ve Komut Konuları
-
-`telemetry_daemon.are`, LXC katmanından gelen downlink emirlerini dinler:
-* `local/arena/params/set`: Seyir/rölanti okuma frekanslarını ve hız eşiğini yeniden başlatmadan çalışma anında (Hot-Reload) dinamik olarak günceller.
