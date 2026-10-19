@@ -1,4 +1,4 @@
-# NetModule NB800 Hibrit Telemetri & Edge Computing Referans Mimarisi
+# NetModule NB800 Hibrit Telemetri & Uç Bilişim Referans Mimarisi
 
 Bu repo, **NetModule NB800** endüstriyel yönlendiricisi üzerinde çalışan **Arena Dili (NRSW Host)** ve **Python 3 (Alpine Linux LXC Konteyneri)** hibrit telemetri ve uç bilişim (Edge Computing) mimarisini içerir.
 
